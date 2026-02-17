@@ -24,7 +24,6 @@ AI_CLIENT = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
 )
 
-
 tools = [
     {
         "type" : "function",
