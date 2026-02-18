@@ -1,6 +1,7 @@
 # tools/katex_formatter.py
 """Renders KaTeX-style math expressions into PNG images using matplotlib mathtext."""
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -101,3 +102,68 @@ def cleanup(png_path: Path) -> None:
         png_path.unlink(missing_ok=True)
     except Exception as exc:
         print(f"[KATEX CLEANUP] Warning: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Math-segment parser
+# ---------------------------------------------------------------------------
+
+# Matches four LaTeX delimiter styles, in priority order:
+#   1. $$…$$  — display math  (checked before single $ to prevent mis-parsing)
+#   2. \[…\]  — display math
+#   3. \(…\)  — inline math
+#   4. $…$    — inline math  (no $$ overlap; no bare newlines inside)
+_MATH_RE = re.compile(
+    r'\$\$(.*?)\$\$'                   # Group 1: $$…$$ display
+    r'|\\\[(.*?)\\\]'                  # Group 2: \[…\] display
+    r'|\\\((.*?)\\\)'                  # Group 3: \(…\) inline
+    r'|(?<!\$)\$([^$\n]+?)\$(?!\$)',   # Group 4: $…$ inline
+    re.DOTALL,
+)
+
+
+def parse_math_segments(text: str) -> list[dict]:
+    """Split *text* into alternating plain-text and math segments.
+
+    Recognises four delimiter styles:
+
+    * ``$$...$$``   — display math
+    * ``\\[...\\]`` — display math
+    * ``\\(...\\)`` — inline math
+    * ``$...$``     — inline math (single ``$``, no newline inside)
+
+    Returns
+    -------
+    list[dict]
+        Each element is either::
+
+            {"type": "text",  "content":    "<plain text>"}
+            {"type": "math",  "expression": "<bare LaTeX expression>"}
+
+    The returned expressions are already stripped of their delimiters and
+    leading/trailing whitespace, ready to be passed directly to :func:`render`.
+    """
+    segments: list[dict] = []
+    last_end = 0
+
+    for m in _MATH_RE.finditer(text):
+        # Plain text that precedes this math block.
+        if m.start() > last_end:
+            content = text[last_end : m.start()]
+            if content:
+                segments.append({"type": "text", "content": content})
+
+        # The first non-None captured group holds the bare expression.
+        expr = next((g for g in m.groups() if g is not None), "").strip()
+        if expr:
+            segments.append({"type": "math", "expression": expr})
+
+        last_end = m.end()
+
+    # Any trailing plain text after the last match.
+    if last_end < len(text):
+        tail = text[last_end:]
+        if tail:
+            segments.append({"type": "text", "content": tail})
+
+    return segments
