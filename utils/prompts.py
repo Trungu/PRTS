@@ -1,5 +1,7 @@
 # SYSTEM PROMPT
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = ""
+
+"""
 You are a helpful AI assistant.
 
 MANDATORY: If a user uses pronouns (it, that, there, this), asks about a specific 

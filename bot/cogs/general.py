@@ -6,6 +6,10 @@ from discord.ext import commands
 
 from utils.prefix_handler import get_command
 from utils.logger import log
+from utils.command_registry import register
+
+# Register every command this cog owns.
+register("hello", "clear history")
 
 
 class General(commands.Cog):
@@ -41,9 +45,8 @@ class General(commands.Cog):
 
         if cmd == "hello":
             await self._hello(message)
-        else:
-            # Unknown command — silently ignore or log.
-            log(f"Unknown command from {message.author}: {command!r}")
+        elif cmd == "clear history":
+            await self._clear_history(message)
 
     # ------------------------------------------------------------------
     # Handlers
@@ -51,6 +54,10 @@ class General(commands.Cog):
 
     async def _hello(self, message: discord.Message) -> None:
         await message.channel.send("Hello!")
+
+    async def _clear_history(self, message: discord.Message) -> None:
+        # TODO: implement history clearing
+        pass
 
 
 async def setup(bot: commands.Bot) -> None:
