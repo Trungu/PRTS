@@ -23,6 +23,7 @@ class DummyMessage:
     def __init__(self) -> None:
         self.author = "user"
         self.channel = DummyChannel()
+        self.attachments: list = []
 
 
 class DummyBot:

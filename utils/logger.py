@@ -1,6 +1,6 @@
 #utils/logger.py
 import sys
-from datetime import datetime
+from datetime import datetime, UTC
 from enum import Enum
 
 
@@ -35,7 +35,7 @@ def log(
         level:     Severity level (DEBUG, INFO, WARNING, ERROR).
         timestamp: Whether to prepend a UTC timestamp.
     """
-    ts = f"[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] " if timestamp else ""
+    ts = f"[{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}] " if timestamp else ""
     formatted = f"{ts}[{level.value}] {message}"
 
     for handler in _handlers:
