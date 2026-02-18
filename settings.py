@@ -36,7 +36,7 @@ DISCORD_TOKEN = get_env_var("DISCORD_TOKEN")
 # LLM
 # ---------------------------------------------------------------------------
 
-# API key for the language model provider (e.g. Groq).
+# API key for the language model provider.
 LLM_API_KEY = get_env_var("LLM_API_KEY")
 # Optional: override the default API endpoint (e.g. a local OpenAI-compatible server).
 LLM_BASE_URL = get_env_var("LLM_BASE_URL", required=False)
