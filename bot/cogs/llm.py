@@ -1,7 +1,8 @@
-# bot/cogs/llm.py — LLM chat command.
+# bot/cogs/llm.py — LLM chat command with agentic tool-call support.
 from __future__ import annotations
 
 import asyncio
+import json
 import discord
 from discord.ext import commands
 
@@ -9,7 +10,35 @@ from utils.prefix_handler import get_command
 from utils.logger import log, LogLevel
 from utils.prompts import SYSTEM_PROMPT
 from utils.command_registry import is_known
-from tools.llm_api import chat
+from tools.llm_api import chat, MAX_TOOL_CALLS
+import settings
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _silent_flags() -> discord.MessageFlags:
+    """Return MessageFlags with suppress_notifications set."""
+    flags = discord.MessageFlags()
+    flags.suppress_notifications = True
+    return flags
+
+
+def _should_silent_all() -> bool:
+    return settings.GLOBAL_SILENT
+
+
+def _should_silent_toolcall() -> bool:
+    return settings.GLOBAL_SILENT or settings.TOOLCALL_SILENT
+
+
+async def _send(channel: discord.TextChannel, content: str, *, force_silent: bool = False) -> None:
+    """Send *content* to *channel*, applying silent flags when configured."""
+    if _should_silent_all() or force_silent:
+        await channel.send(content, silent=True)
+    else:
+        await channel.send(content)
 
 
 class LLM(commands.Cog):
@@ -59,15 +88,32 @@ class LLM(commands.Cog):
             f"| {len(prompt)} chars: {prompt!r}"
         )
 
+        loop = asyncio.get_running_loop()
+
+        def on_tool_call(tool_name: str, args: dict, result: str) -> None:
+            """Called from the worker thread each time the LLM uses a tool."""
+            log(f"[LLM] Tool call: {tool_name}({args}) → {result!r}", LogLevel.DEBUG)
+
+            # Format args compactly for the Discord message.
+            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            notice = f"🔧 **{tool_name}**({args_str}) → `{result}`"
+
+            # Schedule the send back on the event loop from this thread.
+            asyncio.run_coroutine_threadsafe(
+                _send(message.channel, notice, force_silent=_should_silent_toolcall()),
+                loop,
+            )
+
         async with message.channel.typing():
             try:
-                # chat() is synchronous (uses requests), so run it off the
-                # event loop to avoid blocking Discord's async machinery.
-                loop = asyncio.get_running_loop()
-                log(f"[LLM] Sending request to API...", LogLevel.DEBUG)
+                log(f"[LLM] Sending request to API (tool calls enabled, max={MAX_TOOL_CALLS})…", LogLevel.DEBUG)
                 reply = await loop.run_in_executor(
                     None,
-                    lambda: chat(prompt, system_prompt=SYSTEM_PROMPT),
+                    lambda: chat(
+                        prompt,
+                        system_prompt=SYSTEM_PROMPT,
+                        on_tool_call=on_tool_call,
+                    ),
                 )
                 log(
                     f"[LLM] Response received for {message.author} "
@@ -79,9 +125,7 @@ class LLM(commands.Cog):
                     f"| prompt: {prompt!r} | {type(exc).__name__}: {exc}",
                     LogLevel.ERROR,
                 )
-                await message.channel.send(
-                    f"⚠️ The LLM returned an error: `{exc}`"
-                )
+                await _send(message.channel, f"⚠️ The LLM returned an error: `{exc}`")
                 return
 
         # Discord messages cap at 2000 chars — split if needed.
@@ -89,7 +133,7 @@ class LLM(commands.Cog):
         if len(chunks) > 1:
             log(f"[LLM] Reply split into {len(chunks)} chunks for {message.author}", LogLevel.DEBUG)
         for chunk in chunks:
-            await message.channel.send(chunk)
+            await _send(message.channel, chunk)
 
 
 async def setup(bot: commands.Bot) -> None:

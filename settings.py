@@ -77,5 +77,18 @@ KATEX_FONT_SIZE: int = 18
 # DPI of the saved PNG.
 KATEX_DPI: int = 200
 
+# ---------------------------------------------------------------------------
+# Silent mode
+# ---------------------------------------------------------------------------
+
+# If True, tool-call notification messages are sent as silent Discord messages
+# (suppress notifications — the bell-with-slash icon). Users still see them.
+# Set TOOLCALL_SILENT=true in .env to enable.
+TOOLCALL_SILENT: bool = (get_env_var("TOOLCALL_SILENT", required=False) or "false").strip().lower() == "true"
+
+# If True, EVERY message the bot sends (replies, tool notices, errors) is silent.
+# Overrides TOOLCALL_SILENT. Set GLOBAL_SILENT=true in .env to enable.
+GLOBAL_SILENT: bool = (get_env_var("GLOBAL_SILENT", required=False) or "false").strip().lower() == "true"
+
 
 
