@@ -14,6 +14,7 @@ from utils.logger import log, LogLevel
 from utils.prompts import SYSTEM_PROMPT
 from tools.llm_api import chat, MAX_TOOL_CALLS
 from tools.toolcalls.code_runner import get_manager as _get_sandbox_manager
+from tools import katex_formatter
 import settings
 
 
@@ -82,6 +83,60 @@ async def _send(channel: discord.abc.Messageable, content: str, *, force_silent:
         await channel.send(content, silent=True)
     else:
         await channel.send(content)
+
+
+async def _send_reply_with_math(
+    channel: discord.abc.Messageable,
+    reply: str,
+    *,
+    force_silent: bool = False,
+) -> None:
+    """Send *reply* to *channel*, rendering embedded LaTeX blocks as PNG images.
+
+    The reply is first parsed into alternating text / math segments.  Text
+    segments are split at natural boundaries (or hard-cut when SMART_CUTOFF is
+    off) and sent as normal messages.  Each math segment is rendered to a PNG
+    via :mod:`tools.katex_formatter` and sent as a Discord file attachment so
+    it displays inline.  If rendering fails the raw expression is sent as a
+    fenced code block instead.
+    """
+    segments = katex_formatter.parse_math_segments(reply)
+
+    math_count = sum(1 for s in segments if s["type"] == "math")
+    if math_count:
+        log(
+            f"[LLM] Rendering {math_count} LaTeX expression(s) in reply",
+            LogLevel.DEBUG,
+        )
+
+    for seg in segments:
+        if seg["type"] == "text":
+            if settings.SMART_CUTOFF:
+                chunks = _split_smart(seg["content"])
+            else:
+                chunks = _split_hard(seg["content"])
+            for chunk in chunks:
+                if chunk.strip():
+                    await _send(channel, chunk, force_silent=force_silent)
+        else:
+            expr = seg["expression"]
+            try:
+                png_path = await asyncio.to_thread(katex_formatter.render, expr)
+                try:
+                    disc_file = discord.File(str(png_path))
+                    kwargs: dict = {"file": disc_file}
+                    if _should_silent_all() or force_silent:
+                        kwargs["silent"] = True
+                    await channel.send(**kwargs)
+                finally:
+                    katex_formatter.cleanup(png_path)
+            except Exception as exc:
+                log(
+                    f"[LLM] LaTeX render failed for {expr!r}: {exc}",
+                    LogLevel.ERROR,
+                )
+                # Fall back to a fenced code block so the expression is still readable.
+                await _send(channel, f"```\n{expr}\n```", force_silent=force_silent)
 
 
 class LLM(commands.Cog):
@@ -238,19 +293,9 @@ class LLM(commands.Cog):
                 await _send(message.channel, f"⚠️ The LLM returned an error: `{exc}`")
                 return
 
-        # Discord messages cap at 2000 chars — split if needed.
-        if settings.SMART_CUTOFF:
-            chunks = _split_smart(reply)
-        else:
-            chunks = _split_hard(reply)
-        if len(chunks) > 1:
-            log(
-                f"[LLM] Reply split into {len(chunks)} chunks for {message.author} "
-                f"({'smart' if settings.SMART_CUTOFF else 'hard'} cutoff)",
-                LogLevel.DEBUG,
-            )
-        for chunk in chunks:
-            await _send(message.channel, chunk)
+        # Send the reply, rendering any embedded LaTeX blocks as PNG images.
+        # Text is split at natural boundaries; math is rendered inline.
+        await _send_reply_with_math(message.channel, reply)
 
 
 async def setup(bot: commands.Bot) -> None:
