@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
+from contextlib import suppress
+
 import discord
 from discord.ext import commands
 
 from utils.logger import log, LogLevel
 from utils.prompts import SYSTEM_PROMPT
 from tools.llm_api import chat, MAX_TOOL_CALLS
+from tools.toolcalls.code_runner import get_manager as _get_sandbox_manager
 import settings
 
 
@@ -102,17 +107,110 @@ class LLM(commands.Cog):
 
         loop = asyncio.get_running_loop()
 
+        # ── Discord attachment → sandbox upload ───────────────────────────────
+        # If the message has file attachments, upload each one to /workspace
+        # before the LLM call so the model can reference them immediately.
+        full_prompt = prompt
+        if message.attachments:
+            uploaded: list[str] = []
+            try:
+                mgr = await loop.run_in_executor(None, _get_sandbox_manager)
+                for att in message.attachments:
+                    try:
+                        file_bytes = await att.read()
+                        dest = f"{mgr.work_dir}/{att.filename}"
+                        ok = await loop.run_in_executor(
+                            None, mgr.copy_to_container, file_bytes, dest
+                        )
+                        if ok:
+                            uploaded.append(att.filename)
+                            log(
+                                f"[LLM] Attachment '{att.filename}' "
+                                f"({len(file_bytes)} bytes) uploaded to sandbox"
+                            )
+                        else:
+                            log(
+                                f"[LLM] Failed to upload attachment '{att.filename}'",
+                                LogLevel.ERROR,
+                            )
+                    except Exception as exc:
+                        log(
+                            f"[LLM] Error uploading '{att.filename}': {exc}",
+                            LogLevel.ERROR,
+                        )
+            except Exception as exc:
+                log(
+                    f"[LLM] Sandbox unavailable for attachment upload: {exc}",
+                    LogLevel.ERROR,
+                )
+
+            if uploaded:
+                names = ", ".join(f"'{n}'" for n in uploaded)
+                full_prompt = (
+                    f"[System: The following files were uploaded to /workspace "
+                    f"and are ready to use: {names}]\n\n{prompt}"
+                )
+
         def on_tool_call(tool_name: str, args: dict, result: str) -> None:
             """Called from the worker thread each time the LLM uses a tool."""
             log(f"[LLM] Tool call: {tool_name}({args}) → {result!r}", LogLevel.DEBUG)
 
-            # Format args compactly for the Discord message.
+            # ── File download: detect [__discord_file__=<path>] tag ───────────
+            # get_workspace_file embeds this tag so the cog can send the file
+            # to Discord while the LLM sees a clean human-readable message.
+            file_match = re.search(r"\[__discord_file__=([^\]]+)\]", result)
+            if file_match:
+                local_path   = file_match.group(1)
+                display_name = args.get("filename", os.path.basename(local_path))
+                clean_result = re.sub(
+                    r"\s*\[__discord_file__=[^\]]+\]", "", result
+                ).strip()
+
+                async def _send_file() -> None:
+                    try:
+                        disc_file = discord.File(
+                            local_path,
+                            filename=os.path.basename(local_path),
+                        )
+                        kwargs: dict = {
+                            "content": f"📁 `{display_name}`",
+                            "file":    disc_file,
+                        }
+                        if _should_silent_all() or _should_silent_toolcall():
+                            kwargs["silent"] = True
+                        await message.channel.send(**kwargs)
+                    except Exception as exc:
+                        log(
+                            f"[LLM] Failed to send file '{local_path}' "
+                            f"to Discord: {exc}",
+                            LogLevel.ERROR,
+                        )
+                    finally:
+                        with suppress(OSError):
+                            os.remove(local_path)
+
+                asyncio.run_coroutine_threadsafe(_send_file(), loop)
+
+                # Also show the human-readable confirmation as a tool notice.
+                args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                notice = f"📁 **{tool_name}**({args_str}) → {clean_result}"
+                asyncio.run_coroutine_threadsafe(
+                    _send(
+                        message.channel, notice,
+                        force_silent=_should_silent_toolcall(),
+                    ),
+                    loop,
+                )
+                return
+
+            # ── Normal tool-call notice ───────────────────────────────────────
             args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
             notice = f"🔧 **{tool_name}**({args_str}) → `{result}`"
-
-            # Schedule the send back on the event loop from this thread.
             asyncio.run_coroutine_threadsafe(
-                _send(message.channel, notice, force_silent=_should_silent_toolcall()),
+                _send(
+                    message.channel, notice,
+                    force_silent=_should_silent_toolcall(),
+                ),
                 loop,
             )
 
@@ -122,7 +220,7 @@ class LLM(commands.Cog):
                 reply = await loop.run_in_executor(
                     None,
                     lambda: chat(
-                        prompt,
+                        full_prompt,
                         system_prompt=SYSTEM_PROMPT,
                         on_tool_call=on_tool_call,
                     ),
