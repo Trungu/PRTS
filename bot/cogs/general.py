@@ -27,8 +27,7 @@ class General(commands.Cog):
         await message.channel.send("Hello!")
 
     async def _clear_history(self, message: discord.Message, _command: str) -> None:
-        # TODO: implement history clearing
-        pass
+        await message.channel.send("Clearing history is not implemented")
 
 
 async def setup(bot: commands.Bot) -> None:
