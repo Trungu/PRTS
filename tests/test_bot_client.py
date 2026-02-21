@@ -17,6 +17,7 @@ class DummyChannel:
 class DummyAuthor:
     def __init__(self, bot: bool = False) -> None:
         self.bot = bot
+        self.id: int = 0
 
 
 class DummyMessage:

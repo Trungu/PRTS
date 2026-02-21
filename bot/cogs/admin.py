@@ -1,23 +1,53 @@
-# bot/cogs/admin.py — Admin-only mode commands.
+# bot/cogs/admin.py — Admin-only mode commands and user ban management.
 #
 # Commands registered
 # -------------------
 #   admin only / admin on  — Enable admin-only mode (caller must be in admin.txt).
 #   admin off              — Disable admin-only mode (caller must be in admin.txt).
+#   ban <user>             — Ban a user from using the bot (admins only).
+#   unban <user>           — Unban a previously banned user (admins only).
 #
-# Both commands are always gated behind the admin allowed-user list,
-# regardless of whether admin-only mode is currently active.
+# All commands are gated behind the admin allowed-user list.
 
 from __future__ import annotations
 
+import re
 from typing import cast
 
 import discord
 from discord.ext import commands
 
 from bot.client import Bot
-from utils.admin import is_allowed, is_admin_only, reload_allowed_users, set_admin_only
+from utils.admin import (
+    is_allowed,
+    is_admin_only,
+    reload_allowed_users,
+    set_admin_only,
+    ban_user,
+    unban_user,
+    is_banned,
+)
 from utils.logger import log, LogLevel
+
+
+# ---------------------------------------------------------------------------
+# Module helpers
+# ---------------------------------------------------------------------------
+
+def _parse_user_id(text: str) -> int | None:
+    """Extract a Discord user ID from a raw mention or plain integer string.
+
+    Accepts ``<@123456789>``, ``<@!123456789>`` (legacy mention), or a bare
+    integer string.  Returns ``None`` if the text cannot be parsed.
+    """
+    text = text.strip()
+    match = re.fullmatch(r"<@!?(\d+)>", text)
+    if match:
+        return int(match.group(1))
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 class AdminCog(commands.Cog):
@@ -28,6 +58,8 @@ class AdminCog(commands.Cog):
         bot.register_command("admin only", self._admin_only)
         bot.register_command("admin on",   self._admin_only)  # alias
         bot.register_command("admin off",  self._admin_off)
+        bot.register_command("ban",        self._ban)
+        bot.register_command("unban",      self._unban)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -77,6 +109,63 @@ class AdminCog(commands.Cog):
         )
         log(
             f"[Admin] Admin-only mode disabled by {message.author} (id={message.author.id})",
+            LogLevel.INFO,
+        )
+
+
+    async def _ban(self, message: discord.Message, command: str) -> None:
+        """Ban a user from using the bot.
+
+        Only users listed in admin.txt may issue this command.  Accepts a
+        Discord mention (``<@123456789>``) or a raw user-ID integer.
+        """
+        if not is_allowed(message.author.id):
+            await self._deny(message)
+            return
+
+        parts = command.strip().split(None, 1)
+        if len(parts) < 2:
+            await message.channel.send("Usage: `ban <@user>` or `ban <user_id>`")
+            return
+
+        user_id = _parse_user_id(parts[1])
+        if user_id is None:
+            await message.channel.send("⚠️ Could not parse a user ID from that input.")
+            return
+
+        ban_user(user_id)
+        await message.channel.send(
+            f"🔨 User `{user_id}` has been banned from using the bot."
+        )
+        log(
+            f"[Admin] User {user_id} banned by {message.author} (id={message.author.id})",
+            LogLevel.INFO,
+        )
+
+    async def _unban(self, message: discord.Message, command: str) -> None:
+        """Unban a previously banned user.
+
+        Only users listed in admin.txt may issue this command.  Accepts a
+        Discord mention (``<@123456789>``) or a raw user-ID integer.
+        """
+        if not is_allowed(message.author.id):
+            await self._deny(message)
+            return
+
+        parts = command.strip().split(None, 1)
+        if len(parts) < 2:
+            await message.channel.send("Usage: `unban <@user>` or `unban <user_id>`")
+            return
+
+        user_id = _parse_user_id(parts[1])
+        if user_id is None:
+            await message.channel.send("⚠️ Could not parse a user ID from that input.")
+            return
+
+        unban_user(user_id)
+        await message.channel.send(f"✅ User `{user_id}` has been unbanned.")
+        log(
+            f"[Admin] User {user_id} unbanned by {message.author} (id={message.author.id})",
             LogLevel.INFO,
         )
 

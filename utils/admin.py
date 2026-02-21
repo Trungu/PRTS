@@ -33,6 +33,7 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "admin_sta
 
 _admin_only: bool = False
 _allowed_ids: set[int] = set()
+_banned_ids: set[int] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,31 @@ def is_allowed(user_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Ban helpers
+# ---------------------------------------------------------------------------
+
+def ban_user(user_id: int) -> None:
+    """Add *user_id* to the banned-users set and persist state."""
+    global _banned_ids
+    _banned_ids.add(user_id)
+    _save_state()
+    log(f"[Admin] User {user_id} added to ban list.", LogLevel.INFO)
+
+
+def unban_user(user_id: int) -> None:
+    """Remove *user_id* from the banned-users set and persist state."""
+    global _banned_ids
+    _banned_ids.discard(user_id)
+    _save_state()
+    log(f"[Admin] User {user_id} removed from ban list.", LogLevel.INFO)
+
+
+def is_banned(user_id: int) -> bool:
+    """Return ``True`` if *user_id* has been banned from using the bot."""
+    return user_id in _banned_ids
+
+
+# ---------------------------------------------------------------------------
 # Mode flag
 # ---------------------------------------------------------------------------
 
@@ -119,7 +145,7 @@ def _save_state() -> None:
     """
     try:
         with open(STATE_FILE, "w") as fh:
-            json.dump({"admin_only": _admin_only}, fh)
+            json.dump({"admin_only": _admin_only, "banned_ids": sorted(_banned_ids)}, fh)
     except OSError as exc:
         log(
             f"[Admin] Failed to persist state to {STATE_FILE!r}: {exc}",
@@ -134,14 +160,19 @@ def load_state() -> None:
     ``False`` (normal operation).  If the file is unreadable or malformed,
     a warning is logged and the flag defaults to ``False``.
     """
-    global _admin_only
+    global _admin_only, _banned_ids
     try:
         with open(STATE_FILE) as fh:
             data = json.load(fh)
         _admin_only = bool(data.get("admin_only", False))
-        log(f"[Admin] Restored state: admin_only={_admin_only}")
+        _banned_ids = set(int(x) for x in data.get("banned_ids", []))
+        log(
+            f"[Admin] Restored state: admin_only={_admin_only}, "
+            f"banned={len(_banned_ids)} user(s)"
+        )
     except FileNotFoundError:
         _admin_only = False
+        _banned_ids = set()
     except (OSError, json.JSONDecodeError) as exc:
         log(
             f"[Admin] Could not read state file {STATE_FILE!r}: {exc} "
@@ -149,6 +180,7 @@ def load_state() -> None:
             LogLevel.WARNING,
         )
         _admin_only = False
+        _banned_ids = set()
 
 
 # ---------------------------------------------------------------------------

@@ -28,8 +28,11 @@ from utils.admin import (
     set_admin_only,
     is_admin_only,
     load_state,
+    ban_user,
+    unban_user,
+    is_banned,
 )
-from bot.cogs.admin import AdminCog
+from bot.cogs.admin import AdminCog, _parse_user_id
 
 
 # ---------------------------------------------------------------------------
@@ -413,26 +416,30 @@ def test_save_state_writes_enabled(monkeypatch, tmp_path) -> None:
     state_file = str(tmp_path / "state.json")
     monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
     monkeypatch.setattr(admin_module, "_admin_only", True)
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
 
     admin_module._save_state()
 
     import json
     with open(state_file) as fh:
         data = json.load(fh)
-    assert data == {"admin_only": True}
+    assert data["admin_only"] is True
+    assert data["banned_ids"] == []
 
 
 def test_save_state_writes_disabled(monkeypatch, tmp_path) -> None:
     state_file = str(tmp_path / "state.json")
     monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
     monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
 
     admin_module._save_state()
 
     import json
     with open(state_file) as fh:
         data = json.load(fh)
-    assert data == {"admin_only": False}
+    assert data["admin_only"] is False
+    assert data["banned_ids"] == []
 
 
 def test_load_state_restores_enabled(monkeypatch, tmp_path) -> None:
@@ -546,3 +553,435 @@ def test_admin_on_alias_denied_for_non_admin(monkeypatch) -> None:
 
     assert msg.channel.sent[0][0] == "⛔ You are not authorised to change admin settings."
     assert not is_admin_only()
+
+
+# ---------------------------------------------------------------------------
+# _parse_user_id
+# ---------------------------------------------------------------------------
+
+def test_parse_user_id_plain_integer() -> None:
+    assert _parse_user_id("123456789") == 123456789
+
+
+def test_parse_user_id_mention_format() -> None:
+    assert _parse_user_id("<@123456789>") == 123456789
+
+
+def test_parse_user_id_legacy_mention_format() -> None:
+    assert _parse_user_id("<@!123456789>") == 123456789
+
+
+def test_parse_user_id_with_whitespace() -> None:
+    assert _parse_user_id("  42  ") == 42
+
+
+def test_parse_user_id_invalid_returns_none() -> None:
+    assert _parse_user_id("not_a_user") is None
+
+
+def test_parse_user_id_empty_returns_none() -> None:
+    assert _parse_user_id("") is None
+
+
+# ---------------------------------------------------------------------------
+# ban_user / unban_user / is_banned
+# ---------------------------------------------------------------------------
+
+def test_is_banned_false_initially(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+    assert not is_banned(12345)
+
+
+def test_ban_user_adds_to_banned_set(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    ban_user(42)
+
+    assert is_banned(42)
+
+
+def test_ban_user_does_not_affect_others(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    ban_user(42)
+
+    assert not is_banned(99)
+
+
+def test_unban_user_removes_from_banned_set(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_banned_ids", {42})
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    unban_user(42)
+
+    assert not is_banned(42)
+
+
+def test_unban_user_is_idempotent(monkeypatch) -> None:
+    """Unbanning a user who is not banned must not raise."""
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    unban_user(99)  # 99 was never banned — must be silent
+
+    assert not is_banned(99)
+
+
+def test_ban_user_persists_state(monkeypatch, tmp_path) -> None:
+    import json
+    state_file = str(tmp_path / "state.json")
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+
+    ban_user(777)
+
+    with open(state_file) as fh:
+        data = json.load(fh)
+    assert 777 in data["banned_ids"]
+
+
+def test_unban_user_persists_state(monkeypatch, tmp_path) -> None:
+    import json
+    state_file = str(tmp_path / "state.json")
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_banned_ids", {777})
+
+    unban_user(777)
+
+    with open(state_file) as fh:
+        data = json.load(fh)
+    assert 777 not in data["banned_ids"]
+
+
+# ---------------------------------------------------------------------------
+# Persistence — banned_ids round-trip
+# ---------------------------------------------------------------------------
+
+def test_save_state_includes_banned_ids(monkeypatch, tmp_path) -> None:
+    import json
+    state_file = str(tmp_path / "state.json")
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_banned_ids", {10, 20, 30})
+
+    admin_module._save_state()
+
+    with open(state_file) as fh:
+        data = json.load(fh)
+    assert set(data["banned_ids"]) == {10, 20, 30}
+
+
+def test_load_state_restores_banned_ids(monkeypatch, tmp_path) -> None:
+    import json
+    state_file = str(tmp_path / "state.json")
+    (tmp_path / "state.json").write_text(
+        json.dumps({"admin_only": False, "banned_ids": [10, 20, 30]})
+    )
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+
+    load_state()
+
+    assert is_banned(10)
+    assert is_banned(20)
+    assert is_banned(30)
+    assert not is_banned(99)
+
+
+def test_load_state_missing_banned_ids_key_defaults_empty(monkeypatch, tmp_path) -> None:
+    import json
+    state_file = str(tmp_path / "state.json")
+    (tmp_path / "state.json").write_text(json.dumps({"admin_only": False}))
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_banned_ids", {99})  # would be wrong if kept
+
+    load_state()
+
+    assert not is_banned(99)
+
+
+# ---------------------------------------------------------------------------
+# AdminCog — ban/unban command registration
+# ---------------------------------------------------------------------------
+
+def test_admin_cog_registers_ban_and_unban() -> None:
+    bot = DummyBot()
+    AdminCog(cast(Any, bot))
+
+    assert "ban" in bot.registered
+    assert "unban" in bot.registered
+
+
+# ---------------------------------------------------------------------------
+# AdminCog._ban — non-admin is denied
+# ---------------------------------------------------------------------------
+
+def test_ban_denied_for_non_admin(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {999})
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=123)  # NOT in allowed list
+
+    asyncio.run(cog._ban(cast(Any, msg), "ban 456"))
+
+    assert msg.channel.sent[0][0] == "⛔ You are not authorised to change admin settings."
+
+
+# ---------------------------------------------------------------------------
+# AdminCog._ban — admin bans a user
+# ---------------------------------------------------------------------------
+
+def test_ban_by_user_id(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._ban(cast(Any, msg), "ban 555"))
+
+    assert is_banned(555)
+    assert "555" in msg.channel.sent[0][0]
+
+
+def test_ban_by_mention(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._ban(cast(Any, msg), "ban <@555>"))
+
+    assert is_banned(555)
+
+
+def test_ban_legacy_mention(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    monkeypatch.setattr(admin_module, "_banned_ids", set())
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._ban(cast(Any, msg), "ban <@!555>"))
+
+    assert is_banned(555)
+
+
+def test_ban_missing_target_sends_usage(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._ban(cast(Any, msg), "ban"))
+
+    assert "usage" in msg.channel.sent[0][0].lower()
+
+
+def test_ban_invalid_target_sends_error(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._ban(cast(Any, msg), "ban not_valid"))
+
+    assert "parse" in msg.channel.sent[0][0].lower() or "id" in msg.channel.sent[0][0].lower()
+
+
+# ---------------------------------------------------------------------------
+# AdminCog._unban — non-admin is denied
+# ---------------------------------------------------------------------------
+
+def test_unban_denied_for_non_admin(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {999})
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=123)  # NOT in allowed list
+
+    asyncio.run(cog._unban(cast(Any, msg), "unban 456"))
+
+    assert msg.channel.sent[0][0] == "⛔ You are not authorised to change admin settings."
+
+
+# ---------------------------------------------------------------------------
+# AdminCog._unban — admin unbans a user
+# ---------------------------------------------------------------------------
+
+def test_unban_by_user_id(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    monkeypatch.setattr(admin_module, "_banned_ids", {555})
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._unban(cast(Any, msg), "unban 555"))
+
+    assert not is_banned(555)
+    assert "555" in msg.channel.sent[0][0]
+
+
+def test_unban_by_mention(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    monkeypatch.setattr(admin_module, "_banned_ids", {555})
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._unban(cast(Any, msg), "unban <@555>"))
+
+    assert not is_banned(555)
+
+
+def test_unban_missing_target_sends_usage(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._unban(cast(Any, msg), "unban"))
+
+    assert "usage" in msg.channel.sent[0][0].lower()
+
+
+def test_unban_invalid_target_sends_error(monkeypatch) -> None:
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    asyncio.run(cog._unban(cast(Any, msg), "unban not_valid"))
+
+    assert "parse" in msg.channel.sent[0][0].lower() or "id" in msg.channel.sent[0][0].lower()
+
+
+# ---------------------------------------------------------------------------
+# Bot.on_message — ban gate blocks banned non-admin user
+# ---------------------------------------------------------------------------
+
+def test_on_message_blocked_when_banned(monkeypatch) -> None:
+    from bot.client import Bot
+
+    bot = Bot()
+    handled: list[str] = []
+
+    async def handler(message, command):
+        handled.append(command)
+
+    bot.register_command("hello", handler)
+
+    channel = DummyChannel()
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: True)
+
+    class _Author:
+        bot = False
+        id = 456
+
+    class _Msg:
+        content = "gemma hello"
+        author = _Author()
+
+    msg = _Msg()
+    msg.channel = channel  # type: ignore[attr-defined]
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert handled == []
+    assert len(channel.sent) == 1
+    assert "banned" in channel.sent[0][0].lower()
+
+
+def test_on_message_ban_gate_bypassed_for_admin(monkeypatch) -> None:
+    """Admins are never blocked by the ban gate, even if technically banned."""
+    from bot.client import Bot
+
+    bot = Bot()
+    handled: list[str] = []
+
+    async def handler(message, command):
+        handled.append(command)
+
+    bot.register_command("hello", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: True)   # admin
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: True)    # also banned
+
+    class _Author:
+        bot = False
+        id = 42
+
+    class _Msg:
+        content = "gemma hello"
+        author = _Author()
+        channel = DummyChannel()
+
+    async def fake_process(m):
+        pass
+
+    bot.process_commands = fake_process  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, _Msg())))
+
+    assert handled == ["hello"]
+
+
+def test_on_message_non_banned_user_passes_ban_gate(monkeypatch) -> None:
+    from bot.client import Bot
+
+    bot = Bot()
+    handled: list[str] = []
+
+    async def handler(message, command):
+        handled.append(command)
+
+    bot.register_command("hello", handler)
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: "hello")
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+
+    class _Author:
+        bot = False
+        id = 789
+
+    class _Msg:
+        content = "gemma hello"
+        author = _Author()
+        channel = DummyChannel()
+
+    async def fake_process(m):
+        pass
+
+    bot.process_commands = fake_process  # type: ignore[assignment]
+
+    asyncio.run(bot.on_message(cast(Any, _Msg())))
+
+    assert handled == ["hello"]

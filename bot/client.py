@@ -8,7 +8,7 @@ from discord.ext import commands
 
 from utils.logger import log, LogLevel
 from utils.prefix_handler import get_command
-from utils.admin import is_admin_only, is_allowed
+from utils.admin import is_admin_only, is_allowed, is_banned
 
 # Type alias for a command handler: receives a Message and the stripped command string.
 CommandHandler = Callable[[discord.Message, str], Awaitable[None]]
@@ -92,7 +92,12 @@ class Bot(commands.Bot):
 
         # Admin-only gate: reject non-admins when the mode is active.
         if is_admin_only() and not is_allowed(message.author.id):
-            await message.channel.send("Howdy, you have been silened by the admins.")
+            await message.channel.send("Howdy, admin only mode is active.")
+            return
+
+        # Ban gate: reject banned users (admins bypass this).
+        if is_banned(message.author.id) and not is_allowed(message.author.id):
+            await message.channel.send("⛔ You have been banned from using this bot.")
             return
 
         cmd = command.lower().strip()
