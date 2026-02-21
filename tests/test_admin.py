@@ -5,11 +5,13 @@
 #   load_admin_file         — valid IDs, comments/blanks, bad entries, missing file
 #   reload_allowed_users    — updates module-level state
 #   is_allowed              — membership checks
-#   set_admin_only /        — toggle behaviour
+#   set_admin_only /        — toggle behaviour + persistence
 #     is_admin_only
-#   AdminCog registration   — both commands are registered on the bot
+#   _save_state / load_state — JSON persistence across restarts
+#   AdminCog registration   — all three commands registered on the bot
 #   AdminCog._admin_only    — blocked for non-admin, enabled by admin, reloads list
 #   AdminCog._admin_off     — blocked for non-admin, disabled by admin
+#   "admin on" alias        — behaves identically to "admin only"
 #   Bot.on_message guard    — commands blocked when admin-only active
 #   Bot.on_message pass     — commands pass for allowed user in admin-only mode
 
@@ -25,6 +27,7 @@ from utils.admin import (
     is_allowed,
     set_admin_only,
     is_admin_only,
+    load_state,
 )
 from bot.cogs.admin import AdminCog
 
@@ -143,6 +146,7 @@ def test_admin_only_starts_disabled(monkeypatch) -> None:
 
 def test_set_admin_only_enable(monkeypatch) -> None:
     monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
 
     set_admin_only(True)
 
@@ -151,6 +155,7 @@ def test_set_admin_only_enable(monkeypatch) -> None:
 
 def test_set_admin_only_disable(monkeypatch) -> None:
     monkeypatch.setattr(admin_module, "_admin_only", True)
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
 
     set_admin_only(False)
 
@@ -159,6 +164,7 @@ def test_set_admin_only_disable(monkeypatch) -> None:
 
 def test_admin_only_toggle_roundtrip(monkeypatch) -> None:
     monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
 
     assert not is_admin_only()
     set_admin_only(True)
@@ -176,6 +182,7 @@ def test_admin_cog_registers_both_commands() -> None:
     AdminCog(cast(Any, bot))
 
     assert "admin only" in bot.registered
+    assert "admin on" in bot.registered
     assert "admin off" in bot.registered
 
 
@@ -204,6 +211,7 @@ def test_admin_only_denied_for_non_admin(monkeypatch) -> None:
 def test_admin_only_enabled_by_allowed_user(monkeypatch) -> None:
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
     monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
     # Prevent reload_allowed_users from overwriting the state we set above.
     monkeypatch.setattr("bot.cogs.admin.reload_allowed_users", lambda path=None: None)
 
@@ -224,6 +232,7 @@ def test_admin_only_enabled_by_allowed_user(monkeypatch) -> None:
 def test_admin_only_calls_reload(monkeypatch) -> None:
     monkeypatch.setattr(admin_module, "_allowed_ids", {7})
     monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
 
     reload_called: list[bool] = []
     monkeypatch.setattr(
@@ -265,6 +274,7 @@ def test_admin_off_denied_for_non_admin(monkeypatch) -> None:
 def test_admin_off_disabled_by_allowed_user(monkeypatch) -> None:
     monkeypatch.setattr(admin_module, "_allowed_ids", {42})
     monkeypatch.setattr(admin_module, "_admin_only", True)
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
 
     bot = DummyBot()
     cog = AdminCog(cast(Any, bot))
@@ -393,3 +403,146 @@ def test_on_message_no_gate_when_admin_only_off(monkeypatch) -> None:
 
     # Command should still run because admin-only mode is OFF.
     assert handled == ["hello"]
+
+
+# ---------------------------------------------------------------------------
+# Persistence — _save_state / load_state
+# ---------------------------------------------------------------------------
+
+def test_save_state_writes_enabled(monkeypatch, tmp_path) -> None:
+    state_file = str(tmp_path / "state.json")
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", True)
+
+    admin_module._save_state()
+
+    import json
+    with open(state_file) as fh:
+        data = json.load(fh)
+    assert data == {"admin_only": True}
+
+
+def test_save_state_writes_disabled(monkeypatch, tmp_path) -> None:
+    state_file = str(tmp_path / "state.json")
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", False)
+
+    admin_module._save_state()
+
+    import json
+    with open(state_file) as fh:
+        data = json.load(fh)
+    assert data == {"admin_only": False}
+
+
+def test_load_state_restores_enabled(monkeypatch, tmp_path) -> None:
+    import json
+    state_file = str(tmp_path / "state.json")
+    (tmp_path / "state.json").write_text(json.dumps({"admin_only": True}))
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", False)  # start opposite
+
+    load_state()
+
+    assert is_admin_only() is True
+
+
+def test_load_state_restores_disabled(monkeypatch, tmp_path) -> None:
+    import json
+    state_file = str(tmp_path / "state.json")
+    (tmp_path / "state.json").write_text(json.dumps({"admin_only": False}))
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", True)  # start opposite
+
+    load_state()
+
+    assert is_admin_only() is False
+
+
+def test_load_state_missing_file_defaults_false(monkeypatch, tmp_path) -> None:
+    state_file = str(tmp_path / "nonexistent.json")
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", True)  # would be wrong if kept
+
+    load_state()
+
+    assert is_admin_only() is False
+
+
+def test_load_state_corrupt_file_defaults_false(monkeypatch, tmp_path) -> None:
+    state_file = str(tmp_path / "state.json")
+    (tmp_path / "state.json").write_text("not valid json{{")
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", True)
+
+    load_state()
+
+    assert is_admin_only() is False
+
+
+def test_set_admin_only_persists_to_state_file(monkeypatch, tmp_path) -> None:
+    """End-to-end: setting mode writes to file; loading restores it."""
+    import json
+    state_file = str(tmp_path / "state.json")
+    monkeypatch.setattr(admin_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(admin_module, "_admin_only", False)
+
+    set_admin_only(True)
+
+    # File must exist and reflect the new state.
+    with open(state_file) as fh:
+        data = json.load(fh)
+    assert data["admin_only"] is True
+
+    # Simulated restart: reset in-memory flag, then load from file.
+    monkeypatch.setattr(admin_module, "_admin_only", False)
+    load_state()
+    assert is_admin_only() is True
+
+
+# ---------------------------------------------------------------------------
+# "admin on" alias
+# ---------------------------------------------------------------------------
+
+def test_admin_on_alias_registered() -> None:
+    """Both 'admin only' and 'admin on' must be registered and point to the same handler."""
+    bot = DummyBot()
+    AdminCog(cast(Any, bot))
+
+    assert "admin on" in bot.registered
+    # Both keys are bound methods of the same underlying function.
+    assert bot.registered["admin on"].__func__ is bot.registered["admin only"].__func__
+
+
+def test_admin_on_alias_enables_mode(monkeypatch) -> None:
+    """'admin on' must enable admin-only mode identically to 'admin only'."""
+    monkeypatch.setattr(admin_module, "_allowed_ids", {42})
+    monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+    monkeypatch.setattr("bot.cogs.admin.reload_allowed_users", lambda path=None: None)
+
+    bot = DummyBot()
+    cog = AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=42)
+
+    # Call through the alias handler directly.
+    asyncio.run(bot.registered["admin on"](cast(Any, msg), "admin on"))
+
+    assert is_admin_only()
+    assert "enabled" in msg.channel.sent[0][0].lower()
+
+
+def test_admin_on_alias_denied_for_non_admin(monkeypatch) -> None:
+    """'admin on' must deny a non-admin user the same way 'admin only' does."""
+    monkeypatch.setattr(admin_module, "_allowed_ids", {999})
+    monkeypatch.setattr(admin_module, "_admin_only", False)
+    monkeypatch.setattr(admin_module, "_save_state", lambda: None)
+
+    bot = DummyBot()
+    AdminCog(cast(Any, bot))
+    msg = DummyMessage(user_id=123)  # NOT in allowed list
+
+    asyncio.run(bot.registered["admin on"](cast(Any, msg), "admin on"))
+
+    assert msg.channel.sent[0][0] == "⛔ You are not authorised to change admin settings."
+    assert not is_admin_only()

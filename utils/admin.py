@@ -4,17 +4,28 @@
 # -------------
 # When admin-only mode is ON, the bot's on_message dispatcher will reject
 # any command from a user whose Discord ID is not listed in admin.txt.
-# The mode can be toggled with the "admin only" / "admin off" commands,
-# both of which are themselves gated behind the same allowed-user check.
+# The mode can be toggled with the "admin only" / "admin on" / "admin off"
+# commands, all of which are gated behind the same allowed-user check.
+#
+# Persistence
+# -----------
+# The admin-only flag is written to STATE_FILE (admin_state.json) every time
+# it changes, and restored from that file at startup.  This means the mode
+# survives unexpected bot crashes or reboots automatically.
 
 from __future__ import annotations
 
+import json
 import os
 
 from utils.logger import log, LogLevel
 
 # Absolute path to admin.txt, resolved relative to the project root.
 ADMIN_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "admin.txt")
+
+# Absolute path to the state file that persists the admin-only flag across
+# restarts.  Lives next to admin.txt in the project root.
+STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "admin_state.json")
 
 # ---------------------------------------------------------------------------
 # Module-level state — single source of truth
@@ -82,9 +93,13 @@ def is_allowed(user_id: int) -> bool:
 # ---------------------------------------------------------------------------
 
 def set_admin_only(enabled: bool) -> None:
-    """Enable (``True``) or disable (``False``) admin-only mode."""
+    """Enable (``True``) or disable (``False``) admin-only mode.
+
+    Persists the new flag to STATE_FILE so the mode survives restarts.
+    """
     global _admin_only
     _admin_only = enabled
+    _save_state()
 
 
 def is_admin_only() -> bool:
@@ -93,9 +108,54 @@ def is_admin_only() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Initialisation — load once at import time
+# Persistence helpers
 # ---------------------------------------------------------------------------
 
-# Populate the allowed-user set immediately so is_allowed() works before
-# any "admin only" command is ever issued.
+def _save_state() -> None:
+    """Write the current ``_admin_only`` flag to ``STATE_FILE``.
+
+    Failures are logged as warnings but never raised — a write error must
+    never crash the bot.
+    """
+    try:
+        with open(STATE_FILE, "w") as fh:
+            json.dump({"admin_only": _admin_only}, fh)
+    except OSError as exc:
+        log(
+            f"[Admin] Failed to persist state to {STATE_FILE!r}: {exc}",
+            LogLevel.WARNING,
+        )
+
+
+def load_state() -> None:
+    """Restore ``_admin_only`` from ``STATE_FILE``.
+
+    Called once at startup.  If the file is missing the flag defaults to
+    ``False`` (normal operation).  If the file is unreadable or malformed,
+    a warning is logged and the flag defaults to ``False``.
+    """
+    global _admin_only
+    try:
+        with open(STATE_FILE) as fh:
+            data = json.load(fh)
+        _admin_only = bool(data.get("admin_only", False))
+        log(f"[Admin] Restored state: admin_only={_admin_only}")
+    except FileNotFoundError:
+        _admin_only = False
+    except (OSError, json.JSONDecodeError) as exc:
+        log(
+            f"[Admin] Could not read state file {STATE_FILE!r}: {exc} "
+            "— defaulting to False",
+            LogLevel.WARNING,
+        )
+        _admin_only = False
+
+
+# ---------------------------------------------------------------------------
+# Initialisation — runs once at import time
+# ---------------------------------------------------------------------------
+
+# 1. Load the allowed-user set so is_allowed() works immediately.
 reload_allowed_users()
+# 2. Restore the persisted admin-only flag so the mode survives restarts.
+load_state()

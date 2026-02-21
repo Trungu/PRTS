@@ -2,8 +2,8 @@
 #
 # Commands registered
 # -------------------
-#   admin only   — Enable admin-only mode (caller must be in admin.txt).
-#   admin off    — Disable admin-only mode (caller must be in admin.txt).
+#   admin only / admin on  — Enable admin-only mode (caller must be in admin.txt).
+#   admin off              — Disable admin-only mode (caller must be in admin.txt).
 #
 # Both commands are always gated behind the admin allowed-user list,
 # regardless of whether admin-only mode is currently active.
@@ -26,6 +26,7 @@ class AdminCog(commands.Cog):
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
         bot.register_command("admin only", self._admin_only)
+        bot.register_command("admin on",   self._admin_only)  # alias
         bot.register_command("admin off",  self._admin_off)
 
     # ------------------------------------------------------------------
