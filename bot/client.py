@@ -109,7 +109,7 @@ class Bot(commands.Bot):
 
         # Admin-only gate: reject non-admins when the mode is active.
         if is_admin_only() and not is_allowed(message.author.id):
-            await message.channel.send("Howdy, admin only mode is active.")
+            await message.channel.send("⛔ Admin-only mode is active.")
             return
 
         # Ban gate: reject banned users (admins bypass this).

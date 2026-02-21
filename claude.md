@@ -609,7 +609,7 @@ prefix is prepended to the prompt so the LLM knows they are available.
 
 ```bash
 .venv/bin/python -m pytest          # all tests
-.venv/bin/python -m pytest tests/test_admin.py -v  # one file
+.venv/bin/python -m pytest tests/test_admin_cog.py -v  # one file
 ```
 
 **All tests must pass before any commit. Currently: 409 tests, 0 failures.**
@@ -776,11 +776,10 @@ letting an unhandled exception silently swallow the request. The LLM cog's
 7. **Do NOT skip tests.** Every new feature must have tests. Every change must
    leave the suite at 0 failures.
 
-8. **Do NOT break the `command_registry` / `is_known()` contract** if you add a
-   command that the LLM cog should never claim. If your command name could
-   look like a freeform prompt to the LLM, call
-   `command_registry.register("your command")` in addition to
-   `bot.register_command(...)`.
+8. **Do NOT rely on `command_registry` for runtime dispatch.** Routing is
+    owned by `bot.register_command(...)` in `bot/client.py`. Keep
+    `command_registry` usage limited to explicit metadata/tests unless runtime
+    integration is intentionally reintroduced.
 
 9. **Do NOT modify `SYSTEM_PROMPT` casually.** The prompt-leak guard
    (`contains_prompt_leak`) uses a sliding window on the actual prompt text.
