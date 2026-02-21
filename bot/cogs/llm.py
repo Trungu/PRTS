@@ -290,7 +290,13 @@ class LLM(commands.Cog):
                     f"| prompt: {prompt!r} | {type(exc).__name__}: {exc}",
                     LogLevel.ERROR,
                 )
-                await _send(message.channel, f"⚠️ The LLM returned an error: `{exc}`")
+                # Truncate the exception message so it always fits in a Discord
+                # message — raw API responses can be thousands of characters.
+                err_str = str(exc)
+                _ERR_LIMIT = _DISCORD_MAX - 40  # leave room for the prefix + backticks
+                if len(err_str) > _ERR_LIMIT:
+                    err_str = err_str[:_ERR_LIMIT] + "…"
+                await _send(message.channel, f"⚠️ The LLM returned an error: `{err_str}`")
                 return
 
             # Send the reply inside the typing context so the indicator stays
