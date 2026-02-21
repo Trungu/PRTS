@@ -46,6 +46,16 @@ def _should_silent_toolcall() -> bool:
 
 _DISCORD_MAX = 2000
 
+# Regex that strips any safety-sentinel lines the LLM may echo in its final
+# text reply.  The sentinel is meant to be handled silently by on_tool_call;
+# if it leaks into the reply it must be removed before the text is sent.
+# Discord also renders __word__ as underlined text, so even a partial leak
+# would corrupt the message visually.
+_SAFETY_SENTINEL_RE: re.Pattern[str] = re.compile(
+    rf"\[{re.escape(SAFETY_RESPONSE_TAG)}=[^\]]*\][^\n]*\n?",
+    re.IGNORECASE,
+)
+
 
 def _split_smart(text: str, limit: int = _DISCORD_MAX) -> list[str]:
     """Split *text* at natural language boundaries so each chunk ≤ *limit* chars.
@@ -322,6 +332,15 @@ class LLM(commands.Cog):
                         message.channel,
                         "⚠️ I can't share that information.",
                     )
+                    return
+
+                # Guard: strip any safety sentinel tags the LLM may have
+                # echoed verbatim in its text reply.  The tool call already
+                # sent the correct safety message; echoing the raw sentinel
+                # would expose internal tags to the Discord channel.
+                reply = _SAFETY_SENTINEL_RE.sub("", reply).strip()
+                if not reply:
+                    # The tool call said everything that needed saying.
                     return
 
             except Exception as exc:

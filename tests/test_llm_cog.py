@@ -143,3 +143,61 @@ def test_ask_blocks_leak_embedded_in_longer_reply(monkeypatch: pytest.MonkeyPatc
 
     assert len(msg.channel.sent) == 1
     assert "I can't share that information." in msg.channel.sent[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Safety sentinel scrubbing
+# ---------------------------------------------------------------------------
+
+def test_ask_scrubs_safety_sentinel_from_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the LLM echoes a sentinel tag in its final reply it must be stripped
+    before the text is sent to Discord."""
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    # Simulate the LLM echoing the raw sentinel that send_pr_deflection returns.
+    raw = (
+        "[__safety_response__=pr_deflection] PR deflection delivered for topic: 'reds'\n"
+        "I'm not able to comment on that."
+    )
+    monkeypatch.setattr(llm_cog, "chat", lambda *args, **kwargs: raw)
+
+    asyncio.run(cog._ask(cast(Any, msg), "do you support the reds"))
+
+    assert len(msg.channel.sent) == 1
+    content = msg.channel.sent[0][0]
+    assert "__safety_response__" not in content
+    assert "I'm not able to comment on that." in content
+
+
+def test_ask_suppresses_reply_when_only_sentinel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the entire reply is just the sentinel tag the cog must send nothing
+    (the tool call already sent the safety message)."""
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    monkeypatch.setattr(
+        llm_cog,
+        "chat",
+        lambda *args, **kwargs: "[__safety_response__=crisis] Crisis resources delivered.",
+    )
+
+    asyncio.run(cog._ask(cast(Any, msg), "i want to end it all"))
+
+    assert msg.channel.sent == []
+
+
+def test_ask_does_not_scrub_normal_brackets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Square brackets that are not safety sentinels must pass through unchanged."""
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    normal = "The result is [1, 2, 3]."
+    monkeypatch.setattr(llm_cog, "chat", lambda *args, **kwargs: normal)
+
+    asyncio.run(cog._ask(cast(Any, msg), "give me a list"))
+
+    assert msg.channel.sent == [("The result is [1, 2, 3].", {})]

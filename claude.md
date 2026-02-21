@@ -512,7 +512,7 @@ prefix is prepended to the prompt so the LLM knows they are available.
 .venv/bin/python -m pytest tests/test_admin.py -v  # one file
 ```
 
-**All tests must pass before any commit. Currently: 334 tests, 0 failures.**
+**All tests must pass before any commit. Currently: 337 tests, 0 failures.**
 
 ### Test file naming
 
