@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from utils.logger import log, LogLevel
 from utils.prefix_handler import get_command
+from utils.admin import is_admin_only, is_allowed
 
 # Type alias for a command handler: receives a Message and the stripped command string.
 CommandHandler = Callable[[discord.Message, str], Awaitable[None]]
@@ -87,6 +88,11 @@ class Bot(commands.Bot):
 
         command = get_command(message.content)
         if command is None:
+            return
+
+        # Admin-only gate: reject non-admins when the mode is active.
+        if is_admin_only() and not is_allowed(message.author.id):
+            await message.channel.send("⛔ Admin-only mode is active.")
             return
 
         cmd = command.lower().strip()
