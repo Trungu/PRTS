@@ -4,6 +4,11 @@
 
 # Miscellaneous
 .VSCodeCounter
+sandbox_workspace/
+
+admin_state.json
+
+admin.txt
 
 # ------- PYTHON BOILERPLATE -------
 # Byte-compiled / optimized / DLL files
