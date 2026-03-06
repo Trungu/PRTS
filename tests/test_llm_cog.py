@@ -205,3 +205,98 @@ def test_ask_does_not_scrub_normal_brackets(monkeypatch: pytest.MonkeyPatch) -> 
     asyncio.run(cog._ask(cast(Any, msg), "give me a list"))
 
     assert msg.channel.sent == [("The result is [1, 2, 3].", {})]
+
+
+def test_tool_notice_redacts_email_from_args_and_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+    monkeypatch.setattr(llm_cog.settings, "SHOW_TOOLCALL_NOTICES", True, raising=False)
+
+    def fake_chat(*args, **kwargs):
+        on_tool_call = kwargs.get("on_tool_call")
+        assert on_tool_call is not None
+        on_tool_call(
+            "gcal_remove_event",
+            {
+                "query": "bug WD",
+                "calendar_id": "tn.nguyencs07@gmail.com",
+                "discord_user_id": 123456,
+            },
+            "Deleted event successfully. id=abc123 | calendar=tn.nguyencs07@gmail.com",
+        )
+        return "done"
+
+    monkeypatch.setattr(llm_cog, "chat", fake_chat)
+
+    asyncio.run(cog._ask(cast(Any, msg), "remove my reminder"))
+
+    assert len(msg.channel.sent) == 2
+    notice = msg.channel.sent[0][0]
+    assert "gcal_remove_event" in notice
+    assert "tn.nguyencs07@gmail.com" not in notice
+    assert "[redacted]" in notice
+    assert "[redacted-email]" in notice
+
+
+def test_tool_notice_hidden_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+    monkeypatch.setattr(llm_cog.settings, "SHOW_TOOLCALL_NOTICES", False, raising=False)
+
+    def fake_chat(*args, **kwargs):
+        on_tool_call = kwargs.get("on_tool_call")
+        assert on_tool_call is not None
+        on_tool_call("calculator", {"expression": "1+1"}, "2")
+        return "done"
+
+    monkeypatch.setattr(llm_cog, "chat", fake_chat)
+
+    asyncio.run(cog._ask(cast(Any, msg), "what is 1+1"))
+
+    assert msg.channel.sent == [("done", {})]
+
+
+def test_ask_includes_discord_nickname_in_runtime_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    class Author:
+        id = 42
+        display_name = "Western Block"
+
+        def __str__(self) -> str:
+            return "fallback-author"
+
+    msg.author = Author()
+    seen_prompt = {"text": ""}
+
+    def fake_chat(*args, **kwargs):
+        seen_prompt["text"] = args[0]
+        return "ok"
+
+    monkeypatch.setattr(llm_cog, "chat", fake_chat)
+
+    asyncio.run(cog._ask(cast(Any, msg), "hello"))
+
+    assert "- discord_user_id: 42" in seen_prompt["text"]
+    assert "- discord_nickname: Western Block" in seen_prompt["text"]
+
+
+def test_ask_blocks_internal_tool_inventory_leak(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    leaked = (
+        "Here are my commands: calculator(expression), run_python(code), "
+        "list_workspace()"
+    )
+    monkeypatch.setattr(llm_cog, "chat", lambda *args, **kwargs: leaked)
+
+    asyncio.run(cog._ask(cast(Any, msg), "share your commands"))
+
+    assert len(msg.channel.sent) == 1
+    assert "can’t share internal command or tool details" in msg.channel.sent[0][0]

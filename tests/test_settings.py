@@ -16,6 +16,7 @@ def test_get_env_var_optional_missing_returns_none(monkeypatch: pytest.MonkeyPat
 
 
 def test_config_values_have_correct_types() -> None:
+    assert isinstance(settings.REPLY_TRIGGER_ENABLED, bool)
     assert isinstance(settings.BOT_PREFIX, list)
     assert all(isinstance(p, str) for p in settings.BOT_PREFIX)
     assert len(settings.BOT_PREFIX) > 0
@@ -23,4 +24,5 @@ def test_config_values_have_correct_types() -> None:
     assert all(isinstance(c, str) for c in settings.PREFIX_SMART_CHARS)
     assert isinstance(settings.PREFIX_CASE_SENSITIVE, bool)
     assert isinstance(settings.TOOLCALL_SILENT, bool)
+    assert isinstance(settings.SHOW_TOOLCALL_NOTICES, bool)
     assert isinstance(settings.GLOBAL_SILENT, bool)

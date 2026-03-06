@@ -47,6 +47,10 @@ def _should_silent_toolcall() -> bool:
     return settings.GLOBAL_SILENT or settings.TOOLCALL_SILENT
 
 
+def _should_show_toolcall_notices() -> bool:
+    return settings.SHOW_TOOLCALL_NOTICES
+
+
 _DISCORD_MAX = 2000
 
 # Regex that strips any safety-sentinel lines the LLM may echo in its final
@@ -61,6 +65,15 @@ _SAFETY_SENTINEL_RE: re.Pattern[str] = re.compile(
 _GCAL_CONFLICT_TAG = "__gcal_conflict__"
 _GCAL_CONFLICT_RE: re.Pattern[str] = re.compile(
     rf"\[{re.escape(_GCAL_CONFLICT_TAG)}=([^\]]+)\]"
+)
+_EMAIL_RE: re.Pattern[str] = re.compile(
+    r"(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b"
+)
+_SENSITIVE_TOOL_KEY_RE: re.Pattern[str] = re.compile(
+    r"(?i)(calendar(_id)?|attendee(s)?|email)"
+)
+_TOOL_INVENTORY_LEAK_RE: re.Pattern[str] = re.compile(
+    r"(?is)\b(commands?|functions?)\b.{0,80}\b(can run|available|reference)\b"
 )
 
 
@@ -92,6 +105,41 @@ def _extract_conflict_payload(result: str) -> dict | None:
         return json.loads(unquote(match.group(1)))
     except Exception:
         return None
+
+
+def _redact_tool_text(value: str) -> str:
+    """Mask explicit email addresses before posting tool-call notices."""
+    return _EMAIL_RE.sub("[redacted-email]", value)
+
+
+def _redact_tool_value(value, key: str | None = None):
+    """Recursively sanitize tool args/results for user-facing notices."""
+    if isinstance(value, dict):
+        return {k: _redact_tool_value(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_tool_value(v, key) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_tool_value(v, key) for v in value)
+    if isinstance(value, str):
+        if key and _SENSITIVE_TOOL_KEY_RE.search(key):
+            return "[redacted]"
+        return _redact_tool_text(value)
+    return value
+
+
+def _looks_like_internal_tool_inventory(reply: str) -> bool:
+    """Detect replies that expose internal tool/function inventory."""
+    if _TOOL_INVENTORY_LEAK_RE.search(reply):
+        return True
+    tool_names = list(_tool_registry.TOOLS.keys())
+    hits = 0
+    lower_reply = reply.lower()
+    for name in tool_names:
+        if f"{name.lower()}(" in lower_reply or f"`{name.lower()}`" in lower_reply:
+            hits += 1
+            if hits >= 2:
+                return True
+    return False
 
 
 def _split_smart(text: str, limit: int = _DISCORD_MAX) -> list[str]:
@@ -330,10 +378,18 @@ class LLM(commands.Cog):
         # Give the model concrete temporal/user context so it can correctly
         # resolve phrases like "today at 5pm" when using calendar tools.
         user_id = int(getattr(message.author, "id", 0))
+        user_nickname = (
+            getattr(message.author, "display_name", None)
+            or getattr(message.author, "nick", None)
+            or getattr(message.author, "global_name", None)
+            or getattr(message.author, "name", None)
+            or str(message.author)
+        )
         now_local = datetime.now().astimezone()
         full_prompt = (
             "[System runtime context]\n"
             f"- discord_user_id: {user_id}\n"
+            f"- discord_nickname: {user_nickname}\n"
             f"- current_datetime: {now_local.isoformat()}\n"
             f"- current_date: {now_local.date().isoformat()}\n"
             f"- timezone: {now_local.tzname() or 'local'}\n\n"
@@ -381,7 +437,12 @@ class LLM(commands.Cog):
 
         def on_tool_call(tool_name: str, args: dict, result: str) -> None:
             """Called from the worker thread each time the LLM uses a tool."""
-            log(f"[LLM] Tool call: {tool_name}({args}) → {result!r}", LogLevel.DEBUG)
+            safe_args_for_log = _redact_tool_value(args)
+            safe_result_for_log = _redact_tool_text(result)
+            log(
+                f"[LLM] Tool call: {tool_name}({safe_args_for_log}) → {safe_result_for_log!r}",
+                LogLevel.DEBUG,
+            )
 
             if tool_name == "gcal_add_event":
                 conflict_payload = _extract_conflict_payload(result)
@@ -497,9 +558,10 @@ class LLM(commands.Cog):
                         reminder_text = ", ".join(str(v) for v in reminder_vals) + " minutes before"
                     else:
                         reminder_text = "Default / not set"
+                    attendee_vals_safe = _redact_tool_value(attendee_vals, "attendees")
                     attendee_text = (
-                        ", ".join(str(v) for v in attendee_vals)
-                        if isinstance(attendee_vals, list) and attendee_vals
+                        ", ".join(str(v) for v in attendee_vals_safe)
+                        if isinstance(attendee_vals_safe, list) and attendee_vals_safe
                         else ""
                     )
 
@@ -565,15 +627,18 @@ class LLM(commands.Cog):
                 asyncio.run_coroutine_threadsafe(_send_file(), loop)
 
                 # Also show the human-readable confirmation as a tool notice.
-                args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-                notice = f"📁 **{tool_name}**({args_str}) → {clean_result}"
-                asyncio.run_coroutine_threadsafe(
-                    _send(
-                        message.channel, notice,
-                        force_silent=_should_silent_toolcall(),
-                    ),
-                    loop,
-                )
+                if _should_show_toolcall_notices():
+                    args_safe = _redact_tool_value(args)
+                    clean_result_safe = _redact_tool_text(clean_result)
+                    args_str = ", ".join(f"{k}={v!r}" for k, v in args_safe.items())
+                    notice = f"📁 **{tool_name}**({args_str}) → {clean_result_safe}"
+                    asyncio.run_coroutine_threadsafe(
+                        _send(
+                            message.channel, notice,
+                            force_silent=_should_silent_toolcall(),
+                        ),
+                        loop,
+                    )
                 return
 
             # ── Safety response: detect [__safety_response__=<type>] tag ─────
@@ -597,15 +662,18 @@ class LLM(commands.Cog):
 
             # ── Normal tool-call notice ───────────────────────────────────────
             safe_args = {k: v for k, v in args.items() if k != "discord_user_id"}
-            args_str = ", ".join(f"{k}={v!r}" for k, v in safe_args.items())
-            notice = f"🔧 **{tool_name}**({args_str}) → `{result}`"
-            asyncio.run_coroutine_threadsafe(
-                _send(
-                    message.channel, notice,
-                    force_silent=_should_silent_toolcall(),
-                ),
-                loop,
-            )
+            safe_args = cast(dict, _redact_tool_value(safe_args))
+            safe_result = _redact_tool_text(result)
+            if _should_show_toolcall_notices():
+                args_str = ", ".join(f"{k}={v!r}" for k, v in safe_args.items())
+                notice = f"🔧 **{tool_name}**({args_str}) → `{safe_result}`"
+                asyncio.run_coroutine_threadsafe(
+                    _send(
+                        message.channel, notice,
+                        force_silent=_should_silent_toolcall(),
+                    ),
+                    loop,
+                )
 
         def tool_args_transform(tool_name: str, args: dict) -> dict:
             # Never trust model-supplied identity for calendar actions.
@@ -648,6 +716,15 @@ class LLM(commands.Cog):
                 # would expose internal tags to the Discord channel.
                 reply = _SAFETY_SENTINEL_RE.sub("", reply).strip()
                 reply = _GCAL_CONFLICT_RE.sub("", reply).strip()
+                if _looks_like_internal_tool_inventory(reply):
+                    log(
+                        f"[LLM] Internal tool inventory leak blocked for {message.author}",
+                        LogLevel.WARNING,
+                    )
+                    await message.reply(
+                        "I can help with many tasks, but I can’t share internal command or tool details."
+                    )
+                    return
                 if state["handled_conflict_prompt"]:
                     # Conflict embed/buttons already provided canonical choices.
                     # Suppress model prose to avoid contradictory guidance.

@@ -25,6 +25,20 @@ class DummyMessage:
         self.content = content
         self.author = DummyAuthor(bot=author_bot)
         self.channel = DummyChannel()
+        self.reference = None
+
+
+class DummyRef:
+    def __init__(self, resolved) -> None:
+        self.resolved = resolved
+        self.message_id = None
+
+
+class DummyBotAuthoredMessage:
+    def __init__(self, author_id: int) -> None:
+        author = DummyAuthor(bot=True)
+        author.id = author_id
+        self.author = author
 
 
 def test_register_command_lowercases_and_strips() -> None:
@@ -103,6 +117,67 @@ def test_on_message_falls_back_to_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert received == ["ask something"]
     assert processed == [True]
+
+
+def test_on_message_reply_to_bot_without_prefix_calls_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = Bot()
+    msg = DummyMessage("can you help with this?")
+    bot._connection.user = cast(Any, type("U", (), {"id": 999})())  # discord.py user cache
+    msg.reference = DummyRef(DummyBotAuthoredMessage(author_id=999))
+
+    received = []
+    processed = []
+
+    async def llm_handler(message, command):
+        received.append(command)
+
+    async def fake_process_commands(message):
+        processed.append(True)
+
+    bot.set_llm_handler(llm_handler)
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: None)
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.is_admin_only", lambda: False)
+    monkeypatch.setattr("bot.client.is_banned", lambda uid: False)
+    monkeypatch.setattr("bot.client.is_allowed", lambda uid: True)
+    monkeypatch.setattr("bot.client.settings.REPLY_TRIGGER_ENABLED", True)
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert received == ["can you help with this?"]
+    assert processed == [True]
+
+
+def test_on_message_reply_to_bot_without_prefix_ignored_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = Bot()
+    msg = DummyMessage("can you help with this?")
+    bot._connection.user = cast(Any, type("U", (), {"id": 999})())
+    msg.reference = DummyRef(DummyBotAuthoredMessage(author_id=999))
+
+    received = []
+    processed = []
+
+    async def llm_handler(message, command):
+        received.append(command)
+
+    async def fake_process_commands(message):
+        processed.append(True)
+
+    bot.set_llm_handler(llm_handler)
+    bot.process_commands = fake_process_commands  # type: ignore[assignment]
+
+    monkeypatch.setattr("bot.client.get_command", lambda _: None)
+    monkeypatch.setattr("bot.client.detect_crisis", lambda text: False)
+    monkeypatch.setattr("bot.client.settings.REPLY_TRIGGER_ENABLED", False)
+
+    asyncio.run(bot.on_message(cast(Any, msg)))
+
+    assert received == []
+    assert processed == []
 
 
 def test_load_cogs_loads_py_extensions(monkeypatch: pytest.MonkeyPatch) -> None:

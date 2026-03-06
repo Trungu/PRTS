@@ -67,6 +67,17 @@ LLM_BASE_URL = get_env_var("LLM_BASE_URL", required=False)
 LLM_MODEL = get_env_var("LLM_MODEL", required=False)
 
 # ---------------------------------------------------------------------------
+# Reply trigger
+# ---------------------------------------------------------------------------
+
+# If True, a message that replies directly to the bot can be processed even
+# without the configured text prefix.
+REPLY_TRIGGER_ENABLED: bool = _parse_bool(
+    get_env_var("REPLY_TRIGGER_ENABLED", required=False),
+    True,
+)
+
+# ---------------------------------------------------------------------------
 # Bot prefix
 # ---------------------------------------------------------------------------
 
@@ -113,6 +124,10 @@ KATEX_DPI: int = 200
 # (suppress notifications — the bell-with-slash icon). Users still see them.
 TOOLCALL_SILENT: bool = True
 
+# If True, send explicit tool-call notice messages (tool name/args/result) to
+# Discord. Keep disabled in production to avoid exposing internal operations.
+SHOW_TOOLCALL_NOTICES: bool = False
+
 # If True, EVERY message the bot sends (replies, tool notices, errors) is silent.
 # Overrides TOOLCALL_SILENT.
 GLOBAL_SILENT: bool = False
@@ -136,4 +151,3 @@ CLIENT_SECRET = get_env_var("CLIENT_SECRET", required=False)
 OAUTH_BASE_URL = get_env_var("OAUTH_BASE_URL", required=False)
 OAUTH_REDIRECT_URI = get_env_var("OAUTH_REDIRECT_URI", required=False)
 GCAL_DB_PATH = get_env_var("GCAL_DB_PATH", required=False)
-

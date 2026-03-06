@@ -83,6 +83,28 @@ class Bot(commands.Bot):
         """Set the fallback handler that receives any unrecognised prompt."""
         self._llm_handler = handler
 
+    async def _is_reply_to_bot(self, message: discord.Message) -> bool:
+        """Return True when *message* is a reply to a message authored by this bot."""
+        if not settings.REPLY_TRIGGER_ENABLED or self.user is None:
+            return False
+
+        ref = getattr(message, "reference", None)
+        if ref is None:
+            return False
+
+        target = getattr(ref, "resolved", None)
+        if target is None:
+            ref_message_id = getattr(ref, "message_id", None)
+            if ref_message_id is None:
+                return False
+            try:
+                target = await message.channel.fetch_message(ref_message_id)
+            except Exception:
+                return False
+
+        target_author = getattr(target, "author", None)
+        return bool(target_author and getattr(target_author, "id", None) == self.user.id)
+
     # ------------------------------------------------------------------
     # Central on_message dispatcher
     # ------------------------------------------------------------------
@@ -105,6 +127,8 @@ class Bot(commands.Bot):
             await message.channel.send(CRISIS_RESPONSE)
 
         command = get_command(message.content)
+        if command is None and await self._is_reply_to_bot(message):
+            command = message.content.strip()
         if command is None:
             return
 
