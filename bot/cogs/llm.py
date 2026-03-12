@@ -681,6 +681,10 @@ class LLM(commands.Cog):
                 updated = dict(args)
                 updated["discord_user_id"] = user_id
                 return updated
+            if tool_name == "channel_history_lookup":
+                updated = dict(args)
+                updated["channel_id"] = int(getattr(message.channel, "id", 0) or 0)
+                return updated
             return args
 
         async with message.channel.typing():

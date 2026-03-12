@@ -33,6 +33,17 @@ def test_tool_definitions_include_crisis_and_pr() -> None:
     assert "send_pr_deflection" in names
 
 
+def test_tool_definitions_include_channel_history_lookup() -> None:
+    names = [item["function"]["name"] for item in tool_registry.TOOL_DEFINITIONS]
+    assert "channel_history_lookup" in names
+
+
+def test_channel_history_lookup_respects_feature_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tool_registry.settings, "TEMPORARY_MEMORY_ENABLED", False, raising=False)
+    out = tool_registry.channel_history_lookup(channel_id=1, lookback=10)
+    assert "disabled" in out.lower()
+
+
 def test_send_crisis_response_wrapper_callable() -> None:
     """The registry wrapper calls send_crisis_response with no args."""
     result = tool_registry.TOOLS["send_crisis_response"]({})

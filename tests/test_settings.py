@@ -16,7 +16,14 @@ def test_get_env_var_optional_missing_returns_none(monkeypatch: pytest.MonkeyPat
 
 
 def test_config_values_have_correct_types() -> None:
+    assert isinstance(settings.LLM_PROVIDER, str)
+    assert settings.LLM_PROVIDER in {"groq", "ollama"}
     assert isinstance(settings.REPLY_TRIGGER_ENABLED, bool)
+    assert isinstance(settings.TEMPORARY_MEMORY_ENABLED, bool)
+    assert isinstance(settings.TEMP_MEMORY_BUFFER_SIZE, int)
+    assert settings.TEMP_MEMORY_BUFFER_SIZE >= 10
+    assert isinstance(settings.TEMP_MEMORY_MAX_LOOKBACK, int)
+    assert settings.TEMP_MEMORY_MAX_LOOKBACK >= 5
     assert isinstance(settings.BOT_PREFIX, list)
     assert all(isinstance(p, str) for p in settings.BOT_PREFIX)
     assert len(settings.BOT_PREFIX) > 0

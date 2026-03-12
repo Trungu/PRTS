@@ -41,8 +41,11 @@ class Message(TypedDict):
 # Defaults
 # ---------------------------------------------------------------------------
 
+_DEFAULT_PROVIDER  = "groq"
 _DEFAULT_BASE_URL  = "https://api.groq.com/openai/v1"
 _DEFAULT_MODEL     = "llama-3.1-8b-instant"
+_OLLAMA_BASE_URL   = "http://localhost:11434/v1"
+_OLLAMA_MODEL      = "llama3.1:8b"
 MAX_TOOL_CALLS     = 99   # hard ceiling on agentic iterations
 
 # ---------------------------------------------------------------------------
@@ -115,14 +118,17 @@ def chat(
         payload_messages = [dict(m) for m in messages]
 
     # --- Resolve configuration ------------------------------------------------
-    base_url   = (settings.LLM_BASE_URL or _DEFAULT_BASE_URL).rstrip("/")
-    model_name = model or settings.LLM_MODEL or _DEFAULT_MODEL
+    provider   = getattr(settings, "LLM_PROVIDER", _DEFAULT_PROVIDER)
+    default_base_url = _OLLAMA_BASE_URL if provider == "ollama" else _DEFAULT_BASE_URL
+    default_model = _OLLAMA_MODEL if provider == "ollama" else _DEFAULT_MODEL
+    base_url   = (settings.LLM_BASE_URL or default_base_url).rstrip("/")
+    model_name = model or settings.LLM_MODEL or default_model
     url        = f"{base_url}/chat/completions"
 
-    headers = {
-        "Authorization": f"Bearer {settings.LLM_API_KEY}",
-        "Content-Type":  "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    api_key = getattr(settings, "LLM_API_KEY", None)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     # --- Agentic loop ---------------------------------------------------------
     tool_calls_made = 0

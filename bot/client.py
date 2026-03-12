@@ -19,6 +19,7 @@ from utils.rate_limiter import (
     RATE_LIMITED_MESSAGE,
     COOLDOWN_MESSAGE,
 )
+from utils.channel_memory import remember_message
 
 # Type alias for a command handler: receives a Message and the stripped command string.
 CommandHandler = Callable[[discord.Message, str], Awaitable[None]]
@@ -119,6 +120,15 @@ class Bot(commands.Bot):
         """
         if message.author.bot:
             return
+
+        # Temporary in-memory channel history for optional LLM context lookup.
+        remember_message(
+            channel_id=int(getattr(message.channel, "id", 0) or 0),
+            author_name=getattr(message.author, "display_name", None) or str(message.author),
+            content=message.content,
+            author_is_bot=bool(getattr(message.author, "bot", False)),
+            created_at=getattr(message, "created_at", None),
+        )
 
         # Crisis / distress gate — runs on ALL messages, no prefix required.
         # Sends emergency resources immediately and then continues normal

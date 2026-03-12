@@ -8,6 +8,7 @@ import os
 import json
 from urllib.parse import quote
 
+import settings
 from tools.toolcalls.calculator import calculator, TOOL_DEFINITION as _CALC_DEF
 from tools.toolcalls.code_runner import (
     run_python,           TOOL_DEFINITION                as _CODE_DEF,
@@ -20,6 +21,7 @@ from tools.toolcalls.safety_responder import (
     send_crisis_response, CRISIS_TOOL_DEFINITION       as _CRISIS_DEF,
     send_pr_deflection,   PR_DEFLECTION_TOOL_DEFINITION as _PR_DEF,
 )
+from utils.channel_memory import lookup_messages
 
 
 _GCAL_SCOPES = ["https://www.googleapis.com/auth/calendar"]
@@ -563,6 +565,42 @@ def gcal_set_reminder(
     )
 
 
+def channel_history_lookup(
+    channel_id: int,
+    lookback: int = 20,
+    query: str | None = None,
+    include_bot_messages: bool = False,
+) -> str:
+    """Fetch recent in-memory messages from the current Discord channel."""
+    if not settings.TEMPORARY_MEMORY_ENABLED:
+        return "Temporary memory is disabled."
+
+    rows = lookup_messages(
+        channel_id=channel_id,
+        lookback=lookback,
+        query=query,
+        include_bot_messages=include_bot_messages,
+    )
+    if not rows:
+        return "No recent channel context found."
+
+    lines: list[str] = []
+    for row in rows:
+        ts = str(row.get("timestamp", "unknown"))
+        author = str(row.get("author", "unknown"))
+        content = str(row.get("content", ""))
+        content = content.replace("\n", " ").strip()
+        if len(content) > 240:
+            content = content[:240] + "..."
+        lines.append(f"- [{ts}] {author}: {content}")
+
+    shown = len(lines)
+    return (
+        f"Recent channel context ({shown} message(s), capped at {settings.TEMP_MEMORY_MAX_LOOKBACK}):\n"
+        + "\n".join(lines)
+    )
+
+
 GCAL_ADD_EVENT_TOOL_DEFINITION: dict = {
     "type": "function",
     "function": {
@@ -677,6 +715,29 @@ GCAL_SET_REMINDER_TOOL_DEFINITION: dict = {
     },
 }
 
+
+CHANNEL_HISTORY_LOOKUP_TOOL_DEFINITION: dict = {
+    "type": "function",
+    "function": {
+        "name": "channel_history_lookup",
+        "description": (
+            "Fetch recent in-memory messages from the current channel for extra context. "
+            "Use when user asks what people were discussing or references prior messages."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "integer"},
+                "lookback": {"type": "integer"},
+                "query": {"type": "string"},
+                "include_bot_messages": {"type": "boolean"},
+            },
+            "required": ["channel_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -730,6 +791,12 @@ TOOLS: dict[str, Callable[[dict], str]] = {
                                 calendar_id=args.get("calendar_id"),
                                 search_days=int(args.get("search_days", 30)),
                             ),
+    "channel_history_lookup": lambda args: channel_history_lookup(
+                                channel_id=int(args["channel_id"]),
+                                lookback=int(args.get("lookback", 20)),
+                                query=args.get("query"),
+                                include_bot_messages=bool(args.get("include_bot_messages", False)),
+                            ),
 }
 
 # List of OpenAI-style tool definitions sent with every API request.
@@ -746,4 +813,5 @@ TOOL_DEFINITIONS: list[dict] = [
     GCAL_FIND_EVENTS_TOOL_DEFINITION,
     GCAL_REMOVE_EVENT_TOOL_DEFINITION,
     GCAL_SET_REMINDER_TOOL_DEFINITION,
+    CHANNEL_HISTORY_LOOKUP_TOOL_DEFINITION,
 ]

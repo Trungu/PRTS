@@ -48,6 +48,27 @@ def _parse_bool(value: str | None, default: bool) -> bool:
         return False
     return default
 
+
+def _parse_int(value: str | None, default: int, *, min_value: int = 1) -> int:
+    """Parse an int env var with fallback and minimum clamp."""
+    if value is None:
+        return default
+    try:
+        parsed = int(value.strip())
+    except Exception:
+        return default
+    return max(parsed, min_value)
+
+
+def _parse_choice(value: str | None, default: str, allowed: set[str]) -> str:
+    """Parse a case-insensitive enum-like env var with fallback."""
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in allowed:
+        return normalized
+    return default
+
 # ---------------------------------------------------------------------------
 # Discord
 # ---------------------------------------------------------------------------
@@ -59,8 +80,20 @@ DISCORD_TOKEN = get_env_var("DISCORD_TOKEN")
 # LLM
 # ---------------------------------------------------------------------------
 
-# API key for the language model provider.
-LLM_API_KEY = get_env_var("LLM_API_KEY")
+# LLM backend selector. "groq" preserves the current hosted default;
+# "ollama" enables local OpenAI-compatible requests against Ollama.
+LLM_PROVIDER = _parse_choice(
+    get_env_var("LLM_PROVIDER", required=False),
+    "groq",
+    {"groq", "ollama"},
+)
+# API key for the language model provider. Required for hosted backends,
+# optional for local Ollama.
+LLM_API_KEY = get_env_var("LLM_API_KEY", required=False)
+if LLM_PROVIDER != "ollama" and (LLM_API_KEY is None or LLM_API_KEY.strip() == ""):
+    raise RuntimeError(
+        "Required environment variable 'LLM_API_KEY' is not set."
+    )
 # Optional: override the default API endpoint (e.g. a local OpenAI-compatible server).
 LLM_BASE_URL = get_env_var("LLM_BASE_URL", required=False)
 # Optional: model name to use (e.g. 'llama3'). Falls back to provider default if unset.
@@ -75,6 +108,30 @@ LLM_MODEL = get_env_var("LLM_MODEL", required=False)
 REPLY_TRIGGER_ENABLED: bool = _parse_bool(
     get_env_var("REPLY_TRIGGER_ENABLED", required=False),
     True,
+)
+
+# ---------------------------------------------------------------------------
+# Temporary memory (channel history context)
+# ---------------------------------------------------------------------------
+
+# If True, enable in-memory channel history lookup tool for LLM context.
+TEMPORARY_MEMORY_ENABLED: bool = _parse_bool(
+    get_env_var("TEMPORARY_MEMORY_ENABLED", required=False),
+    False,
+)
+
+# Max messages stored per channel in transient memory.
+TEMP_MEMORY_BUFFER_SIZE: int = _parse_int(
+    get_env_var("TEMP_MEMORY_BUFFER_SIZE", required=False),
+    200,
+    min_value=10,
+)
+
+# Hard cap for on-demand lookback requests from the model.
+TEMP_MEMORY_MAX_LOOKBACK: int = _parse_int(
+    get_env_var("TEMP_MEMORY_MAX_LOOKBACK", required=False),
+    60,
+    min_value=5,
 )
 
 # ---------------------------------------------------------------------------

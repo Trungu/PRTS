@@ -267,8 +267,9 @@ os.getenv("DISCORD_TOKEN")  # WRONG — never do this outside settings.py
 | Variable | Type | Purpose |
 |---|---|---|
 | `DISCORD_TOKEN` | str | Bot token (required) |
-| `LLM_API_KEY` | str | API key for LLM provider (required) |
-| `LLM_BASE_URL` | str\|None | API endpoint override (default: Groq) |
+| `LLM_PROVIDER` | str | LLM backend selector (`groq` default, `ollama` optional) |
+| `LLM_API_KEY` | str\|None | API key for hosted LLM providers; optional for Ollama |
+| `LLM_BASE_URL` | str\|None | API endpoint override (default: Groq or Ollama local URL) |
 | `LLM_MODEL` | str\|None | Model name override |
 | `BOT_PREFIX` | list[str] | Trigger word(s) e.g. `["gemma"]` |
 | `PREFIX_SMART_CHARS` | list[str] | Suffix variants e.g. `[" ", ", ", ". "]` |
@@ -540,7 +541,9 @@ not persist across rebuilds.
 ### Provider
 
 Groq API by default (`https://api.groq.com/openai/v1`, model
-`llama-3.1-8b-instant`). Fully OpenAI-compatible — swap by setting
+`llama-3.1-8b-instant`). Local Ollama is also supported via
+`LLM_PROVIDER=ollama` (default `http://localhost:11434/v1`, model
+`llama3.1:8b`). Fully OpenAI-compatible — swap providers or override
 `LLM_BASE_URL` and `LLM_MODEL` in `.env`.
 
 ### `tools/llm_api.py` — `chat()`

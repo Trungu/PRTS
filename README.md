@@ -63,7 +63,7 @@ cp .env.example .env
 
 - `DISCORD_TOKEN`
 - `BOT_PREFIX`
-- `LLM_API_KEY`
+- `LLM_API_KEY` (required for hosted LLM providers; not required when `LLM_PROVIDER=ollama`)
 - Google OAuth settings (`CLIENT_ID`, `CLIENT_SECRET`, `OAUTH_BASE_URL`, `OAUTH_REDIRECT_URI`)
 - Supabase settings (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`)
 
@@ -78,6 +78,11 @@ python main.py
 - `settings.py` is the single source of truth for runtime configuration.
 - Environment variables are loaded and parsed there (tokens, API keys, OAuth settings, prefixes).
 - Feature flags (for example reply-trigger behavior and message silence modes) are also defined there.
+- LLM backend selection is opt-in via `LLM_PROVIDER`:
+  - default: hosted Groq-compatible mode
+  - optional: `ollama` for local OpenAI-compatible requests
+- When `LLM_PROVIDER=ollama`, the default endpoint is `http://localhost:11434/v1` and the default model is `llama3.1:8b`.
+- Existing hosted setups do not need any `.env` changes.
 
 ## Example Use Cases
 

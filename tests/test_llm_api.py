@@ -23,16 +23,23 @@ def test_chat_plain_text_reply(monkeypatch: pytest.MonkeyPatch) -> None:
         "choices": [{"finish_reason": "stop", "message": {"content": "hello"}}]
     }
 
+    captured = {}
+
     def fake_post(*args, **kwargs):
+        captured["url"] = args[0]
+        captured["headers"] = kwargs["headers"]
         return DummyResponse(payload)
 
     monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "groq", raising=False)
     monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
     monkeypatch.setattr(llm_api.settings, "LLM_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(llm_api.settings, "LLM_MODEL", "model-x")
 
     result = llm_api.chat("hi")
     assert result == "hello"
+    assert captured["url"] == "https://example.com/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer key"
 
 
 def test_chat_tool_call_loop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,6 +73,7 @@ def test_chat_tool_call_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 
     monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "groq", raising=False)
     monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
     monkeypatch.setattr(llm_api.settings, "LLM_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(llm_api.settings, "LLM_MODEL", "model-x")
@@ -81,6 +89,7 @@ def test_chat_bad_shape_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         return DummyResponse({"not": "expected"})
 
     monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "groq", raising=False)
     monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
 
     with pytest.raises(ValueError):
@@ -116,6 +125,7 @@ def test_chat_tool_args_transform_applied(monkeypatch: pytest.MonkeyPatch) -> No
         return responses.pop(0)
 
     monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "groq", raising=False)
     monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
     monkeypatch.setattr(llm_api.settings, "LLM_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(llm_api.settings, "LLM_MODEL", "model-x")
@@ -126,3 +136,29 @@ def test_chat_tool_args_transform_applied(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     assert result == "3"
+
+
+def test_chat_ollama_defaults_without_auth_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "local"}}]
+    }
+    captured = {}
+
+    def fake_post(*args, **kwargs):
+        captured["url"] = args[0]
+        captured["headers"] = kwargs["headers"]
+        captured["json"] = kwargs["json"]
+        return DummyResponse(payload)
+
+    monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "ollama", raising=False)
+    monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", None, raising=False)
+    monkeypatch.setattr(llm_api.settings, "LLM_BASE_URL", None, raising=False)
+    monkeypatch.setattr(llm_api.settings, "LLM_MODEL", None, raising=False)
+
+    result = llm_api.chat("hi")
+
+    assert result == "local"
+    assert captured["url"] == "http://localhost:11434/v1/chat/completions"
+    assert "Authorization" not in captured["headers"]
+    assert captured["json"]["model"] == "llama3.1:8b"
