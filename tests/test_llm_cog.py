@@ -427,6 +427,65 @@ def test_ask_injects_extended_context_for_first_problem_in_channel_prompt(
     assert "Do not ask for a channel ID." in seen_prompt["text"]
 
 
+def test_ask_handles_recent_message_lookup_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    monkeypatch.setattr(
+        llm_cog,
+        "lookup_messages",
+        lambda **kwargs: [
+            {
+                "timestamp": "2026-03-14T23:15:51.739000+00:00",
+                "author": "Parthiv",
+                "content": "processor go brrrrrrrr",
+                "author_is_bot": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        llm_cog,
+        "chat",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("chat() should not run")),
+    )
+
+    asyncio.run(
+        cog._ask(
+            cast(Any, msg),
+            "find the most recent message by the user Parthiv using your lookup tool",
+        )
+    )
+
+    assert len(msg.channel.sent) == 1
+    content = msg.channel.sent[0][0]
+    assert "processor go brrrrrrrr" in content
+    assert "Parthiv" in content
+    assert "Timestamp:" in content
+
+
+def test_ask_recent_message_lookup_handles_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = DummyBot()
+    cog = llm_cog.LLM(cast(Any, bot))
+    msg = DummyMessage()
+
+    monkeypatch.setattr(llm_cog, "lookup_messages", lambda **kwargs: [])
+
+    asyncio.run(
+        cog._ask(
+            cast(Any, msg),
+            "what is the most recent message by Parthiv",
+        )
+    )
+
+    assert len(msg.channel.sent) == 1
+    assert "couldn't find a recent message" in msg.channel.sent[0][0].lower()
+
+
 def test_ask_injects_default_recent_context_for_every_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,7 +21,8 @@ class DummyResponse:
 
 def test_chat_plain_text_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {
-        "choices": [{"finish_reason": "stop", "message": {"content": "hello"}}]
+        "choices": [{"finish_reason": "stop", "message": {"content": "hello"}}],
+        "usage": {"completion_tokens": 5},
     }
 
     captured = {}
@@ -205,3 +206,24 @@ def test_chat_explicit_timeout_overrides_settings(monkeypatch: pytest.MonkeyPatc
 
     assert result == "hello"
     assert captured["timeout"] == 15
+
+
+def test_chat_logs_token_throughput_when_usage_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "hello"}}],
+        "usage": {"completion_tokens": 10},
+    }
+    logged = []
+
+    def fake_post(*args, **kwargs):
+        return DummyResponse(payload)
+
+    monkeypatch.setattr(llm_api.requests, "post", fake_post)
+    monkeypatch.setattr(llm_api, "log", lambda message, level=None, **kwargs: logged.append((message, level)))
+    monkeypatch.setattr(llm_api.settings, "LLM_PROVIDER", "groq", raising=False)
+    monkeypatch.setattr(llm_api.settings, "LLM_API_KEY", "key")
+
+    result = llm_api.chat("hi")
+
+    assert result == "hello"
+    assert any("tok/s=" in message for message, _level in logged)

@@ -220,6 +220,41 @@ def _is_channel_recall_request(prompt: str) -> bool:
     return score >= 2
 
 
+def _extract_recent_message_author(prompt: str) -> str | None:
+    """Extract an author target from explicit 'recent message by X' prompts."""
+    patterns = (
+        r"(?i)\b(?:find|show|lookup|look up|what(?:'s| is))\b.*?\b(?:most recent|latest|last)\b.*?\bmessage\b.*?\bby\b\s+(?:the user\s+)?([A-Za-z0-9_. -]{2,32})",
+        r"(?i)\b(?:most recent|latest|last)\b.*?\bmessage\b.*?\bfrom\b\s+(?:the user\s+)?([A-Za-z0-9_. -]{2,32})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, prompt)
+        if match:
+            return match.group(1).strip().strip("?.!,")
+    return None
+
+
+def _format_recent_message_lookup(author: str, rows: list[dict]) -> str:
+    """Format a deterministic response for a recent-message author lookup."""
+    matching = [
+        row for row in rows
+        if str(row.get("author", "")).strip().lower() == author.lower()
+    ]
+    if not matching:
+        return (
+            f"I couldn't find a recent message in this channel from `{author}` "
+            f"within the last {settings.TEMP_MEMORY_MAX_LOOKBACK} stored messages."
+        )
+
+    row = matching[-1]
+    timestamp = str(row.get("timestamp", "unknown time"))
+    content = str(row.get("content", "")).strip() or "[no text]"
+    return (
+        f"The most recent message in this channel from `{row.get('author', author)}` was:\n"
+        f"> {content}\n\n"
+        f"Timestamp: `{timestamp}`"
+    )
+
+
 def _format_recent_rows(rows: list[dict], *, cap: int) -> str:
     """Render recent channel rows into a compact prompt block."""
     if not rows:
@@ -482,6 +517,17 @@ class LLM(commands.Cog):
     async def _ask(self, message: discord.Message, prompt: str) -> None:
         """Send *prompt* to the LLM and reply with the response."""
         if await self._maybe_resolve_conflict_from_text(message, prompt):
+            return
+
+        recent_author = _extract_recent_message_author(prompt)
+        if recent_author:
+            rows = lookup_messages(
+                channel_id=int(getattr(message.channel, "id", 0) or 0),
+                lookback=settings.TEMP_MEMORY_MAX_LOOKBACK,
+                query=recent_author,
+                include_bot_messages=False,
+            )
+            await message.reply(_format_recent_message_lookup(recent_author, rows))
             return
 
         log(

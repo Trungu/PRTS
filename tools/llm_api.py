@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import time
 import requests
 from typing import Callable, Literal, TypedDict
 
@@ -59,6 +60,21 @@ def _response_body_for_log(response: requests.Response) -> str:
         return json.dumps(response.json(), ensure_ascii=True)
     except Exception:
         return "<no response body>"
+
+
+def _extract_completion_tokens(data: dict) -> int | None:
+    """Extract completion-token counts from common provider response shapes."""
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        completion_tokens = usage.get("completion_tokens")
+        if isinstance(completion_tokens, int):
+            return completion_tokens
+
+    for key in ("eval_count", "completion_tokens"):
+        value = data.get(key)
+        if isinstance(value, int):
+            return value
+    return None
 
 # ---------------------------------------------------------------------------
 # Core function
@@ -159,6 +175,7 @@ def chat(
             body["tools"]       = TOOL_DEFINITIONS
             body["tool_choice"] = "auto"
 
+        started_at = time.monotonic()
         response = requests.post(url, headers=headers, json=body, timeout=request_timeout)
         try:
             response.raise_for_status()
@@ -170,6 +187,15 @@ def chat(
             )
             raise
         data = response.json()
+        elapsed = max(time.monotonic() - started_at, 1e-6)
+        completion_tokens = _extract_completion_tokens(data)
+        if completion_tokens is not None:
+            tok_s = completion_tokens / elapsed
+            log(
+                f"[LLM API] model={model_name} | completion_tokens={completion_tokens} "
+                f"| elapsed={elapsed:.2f}s | tok/s={tok_s:.2f}",
+                LogLevel.DEBUG,
+            )
 
         try:
             choice  = data["choices"][0]
