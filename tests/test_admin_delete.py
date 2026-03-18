@@ -66,6 +66,7 @@ class _DelMsg:
         self.author = _DelAuthor(user_id, bot=is_bot)
         self.channel: _DelChannel = _DelChannel()
         self._deleted: bool = False
+        self._state = None
 
     async def delete(self) -> None:
         self._deleted = True
@@ -85,6 +86,9 @@ class _DelChannel:
 
     def history(self, *, limit: int = 100, before=None, **kwargs):
         msgs = self._history_msgs
+        if before is not None:
+            # We filter out the before message (and technically those after, but list is short)
+            msgs = [m for m in msgs if m is not before]
 
         async def _gen():
             for m in msgs:
@@ -93,7 +97,10 @@ class _DelChannel:
         return _gen()
 
     async def delete_messages(self, messages) -> None:
-        self.deleted_batches.append(list(messages))
+        messages = list(messages)
+        self.deleted_batches.append(messages)
+        for msg in messages:
+            msg._deleted = True
 
     async def purge(self, *, limit: int = 100, after=None, check=None, **kwargs) -> list:
         self.purge_calls.append({"limit": limit, "after": after, "check": check})

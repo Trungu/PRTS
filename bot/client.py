@@ -159,6 +159,8 @@ class Bot(commands.Bot):
         command = get_command(message.content)
         if command is None and await self._is_reply_to_bot(message):
             command = message.content.strip()
+        if command is None and getattr(message.channel, "type", None) == discord.ChannelType.private:
+            command = message.content.strip()
         if command is None:
             return
 
