@@ -4,6 +4,7 @@ from __future__ import annotations
 from utils.gcal_db import create_connect_request, get_refresh_token
 from utils.gcal_db import set_selected_calendars, get_selected_calendars
 import asyncio
+from typing import Awaitable, Callable
 
 from datetime import datetime, timedelta, timezone
 from google.auth.transport.requests import Request
@@ -14,6 +15,7 @@ from googleapiclient.errors import HttpError
 # DISCORD IMPORTS
 import discord
 from discord import app_commands
+from discord.http import Route
 from discord.ext import commands
 import settings
 
@@ -21,6 +23,8 @@ import settings
 OAUTH_BASE_URL = settings.OAUTH_BASE_URL
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
+_FLAG_EPHEMERAL = 1 << 6
+_FLAG_COMPONENTS_V2 = 1 << 15
 
 
 class GCal(commands.GroupCog, group_name="gcal"):
@@ -53,6 +57,242 @@ class GCal(commands.GroupCog, group_name="gcal"):
             return f"All-day ({d})"
 
         return "Unknown time"
+
+    @staticmethod
+    def _single_line(text: str | None) -> str:
+        if not text:
+            return ""
+        return " ".join(str(text).split())
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 1)].rstrip() + "…"
+
+    @staticmethod
+    def _event_start_datetime(ev: dict) -> datetime | None:
+        start = ev.get("start", {})
+        raw = start.get("dateTime")
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _build_upcoming_v2_components(
+        self,
+        *,
+        owner_id: int,
+        items: list[dict],
+        range_mode: str,
+        page: int,
+        page_size: int = 6,
+    ) -> list[dict]:
+        total_pages = max(1, (len(items) + page_size - 1) // page_size)
+        page = max(0, min(page, total_pages - 1))
+        start = page * page_size
+        end = start + page_size
+        page_items = items[start:end]
+
+        card_components: list[dict] = [
+            {"type": 10, "content": "## 🗓️ Upcoming Events"},
+            {
+                "type": 10,
+                "content": (
+                    f"Schedule snapshot\n"
+                    f"{len(items)} event(s) in "
+                    f"{'today' if range_mode == 'today' else 'the next 24 hours'}."
+                ),
+            },
+            {"type": 14, "divider": True, "spacing": 1},
+        ]
+
+        for i, ev in enumerate(page_items):
+            title = self._truncate(self._single_line(str(ev.get("summary") or "Untitled")), 96)
+            start_dt = self._event_start_datetime(ev)
+            badge = ""
+            if start_dt is not None:
+                now = datetime.now(start_dt.tzinfo or timezone.utc)
+                mins = int((start_dt - now).total_seconds() // 60)
+                if 0 <= mins <= 15:
+                    badge = " `Now`"
+                elif 16 <= mins <= 60:
+                    badge = " `Soon`"
+            when = self._event_time_display(ev)
+            location = self._truncate(self._single_line(ev.get("location")), 64)
+            body = f"### {title}{badge}\n🕒 {when}"
+            if location:
+                body += f"\n📍 {location}"
+            card_components.append({"type": 10, "content": body})
+            if i < len(page_items) - 1:
+                card_components.append({"type": 14, "divider": False, "spacing": 2})
+
+        card_components.append({"type": 14, "divider": False, "spacing": 2})
+        card_components.append(
+            {
+                "type": 10,
+                "content": (
+                    f"*Page {page + 1}/{total_pages} • "
+                    f"{'Today' if range_mode == 'today' else 'Next 24h'}*"
+                ),
+            }
+        )
+        card_components.append({"type": 14, "divider": True, "spacing": 1})
+        card_components.append(
+            {
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,
+                        "style": 2,
+                        "label": "◀",
+                        "custom_id": f"gcalv2:{owner_id}:prev:{range_mode}:{page}",
+                        "disabled": page <= 0,
+                    },
+                    {
+                        "type": 2,
+                        "style": 1,
+                        "label": "▶",
+                        "custom_id": f"gcalv2:{owner_id}:next:{range_mode}:{page}",
+                        "disabled": page >= (total_pages - 1),
+                    },
+                    {
+                        "type": 2,
+                        "style": 2,
+                        "label": "Refresh",
+                        "custom_id": f"gcalv2:{owner_id}:refresh:{range_mode}:{page}",
+                    },
+                    {
+                        "type": 2,
+                        "style": 3,
+                        "label": "🗂️ Calendars",
+                        "custom_id": f"gcalv2:{owner_id}:cal:{range_mode}:{page}",
+                    },
+                    {
+                        "type": 2,
+                        "style": 2,
+                        "label": "⏱️ Next 24h" if range_mode == "today" else "📆 Today",
+                        "custom_id": f"gcalv2:{owner_id}:toggle:{range_mode}:{page}",
+                    },
+                ],
+            }
+        )
+
+        return [{"type": 17, "components": card_components}]
+
+    async def _fetch_calendar_options_for_user(
+        self, discord_user_id: int
+    ) -> tuple[list[discord.SelectOption], dict[str, tuple[str, str]]]:
+        rt = await asyncio.to_thread(get_refresh_token, discord_user_id)
+        if not rt:
+            raise RuntimeError("You are not connected. Run `/gcal connect` first.")
+
+        client_id, client_secret = self._require_google_oauth_client()
+
+        def fetch_calendar_options() -> tuple[list[discord.SelectOption], dict[str, tuple[str, str]]]:
+            creds = Credentials(
+                token=None,
+                refresh_token=rt,
+                token_uri=TOKEN_URI,
+                client_id=client_id,
+                client_secret=client_secret,
+                scopes=SCOPES,
+            )
+            creds.refresh(Request())
+            service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+            items = service.calendarList().list().execute().get("items", [])
+
+            def score(c: dict) -> tuple[int, int]:
+                primary_rank = 0 if c.get("primary") else 1
+                role = c.get("accessRole") or ""
+                role_rank = 0 if role in ("owner", "writer") else 1
+                return (primary_rank, role_rank)
+
+            items.sort(key=score)
+
+            options: list[discord.SelectOption] = []
+            index_to_calendar: dict[str, tuple[str, str]] = {}
+            i = 0
+            for c in items:
+                if i >= 5:
+                    break
+
+                cal_id = c.get("id")
+                name = c.get("summary") or cal_id
+                if not cal_id or not name:
+                    continue
+
+                idx = str(i)
+                label = name[:100]
+                desc = ("Primary" if c.get("primary") else (c.get("accessRole") or ""))[:100] or None
+                options.append(discord.SelectOption(label=label, value=idx, description=desc))
+                index_to_calendar[idx] = (cal_id, name)
+                i += 1
+
+            return options, index_to_calendar
+
+        return await asyncio.to_thread(fetch_calendar_options)
+
+    async def _fetch_upcoming_events(
+        self, discord_user_id: int, *, range_mode: str = "next24h"
+    ) -> list[dict]:
+        rt = await asyncio.to_thread(get_refresh_token, discord_user_id)
+        if not rt:
+            raise RuntimeError("You are not connected. Run `/gcal connect` first.")
+
+        selected = await asyncio.to_thread(get_selected_calendars, discord_user_id)
+        calendar_ids = selected or ["primary"]
+        client_id, client_secret = self._require_google_oauth_client()
+
+        def fetch() -> list[dict]:
+            creds = Credentials(
+                token=None,
+                refresh_token=rt,
+                token_uri=TOKEN_URI,
+                client_id=client_id,
+                client_secret=client_secret,
+                scopes=SCOPES,
+            )
+            creds.refresh(Request())
+            service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+            now_utc = datetime.now(timezone.utc)
+            time_min = now_utc.isoformat().replace("+00:00", "Z")
+            if range_mode == "today":
+                now_local = datetime.now().astimezone()
+                next_midnight_local = datetime.combine(
+                    now_local.date() + timedelta(days=1),
+                    datetime.min.time(),
+                    tzinfo=now_local.tzinfo,
+                )
+                time_max_dt = next_midnight_local.astimezone(timezone.utc)
+            else:
+                time_max_dt = now_utc + timedelta(days=1)
+            time_max = time_max_dt.isoformat().replace("+00:00", "Z")
+
+            all_items: list[dict] = []
+            for cal_id in calendar_ids:
+                res = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                    orderBy="startTime",
+                    maxResults=25,
+                ).execute()
+                all_items.extend(res.get("items", []))
+
+            def start_key(ev: dict) -> str:
+                start = ev.get("start", {})
+                return start.get("dateTime") or start.get("date") or ""
+
+            all_items.sort(key=start_key)
+            return all_items[:48]
+
+        return await asyncio.to_thread(fetch)
 
     @staticmethod
     def _parse_iso_datetime(raw: str) -> datetime:
@@ -239,7 +479,7 @@ class GCal(commands.GroupCog, group_name="gcal"):
 
     @app_commands.command(name="remove_event", description="Delete a Google Calendar event by event ID")
     @app_commands.describe(
-        event_id="Event ID to delete (shown by /gcal test or /gcal add_event)",
+        event_id="Event ID to delete (shown by /gcal add_event)",
         calendar_id="Optional calendar ID (defaults to first selected or primary)",
     )
     async def remove_event(
@@ -373,67 +613,8 @@ class GCal(commands.GroupCog, group_name="gcal"):
     @app_commands.command(name="calendars", description="Choose which calendars to use for reminders")
     async def calendars(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-
-        rt = await asyncio.to_thread(get_refresh_token, interaction.user.id)
-        if not rt:
-            await interaction.followup.send("You are not connected. Run `/gcal connect` first.", ephemeral=True)
-            return
         try:
-            client_id, client_secret = self._require_google_oauth_client()
-        except RuntimeError as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-            return
-
-        def fetch_calendar_options() -> tuple[list[discord.SelectOption], dict[str, tuple[str, str]]]:
-            creds = Credentials(
-                token=None,
-                refresh_token=rt,
-                token_uri=TOKEN_URI,
-                client_id=client_id,
-                client_secret=client_secret,
-                scopes=SCOPES,
-            )
-            creds.refresh(Request())
-            service = build("calendar", "v3", credentials=creds, cache_discovery=False)
-
-            items = service.calendarList().list().execute().get("items", [])
-
-            # Prefer primary first, then owned/writer calendars.
-            def score(c: dict) -> tuple[int, int]:
-                # lower tuple sorts first
-                primary_rank = 0 if c.get("primary") else 1
-                role = c.get("accessRole") or ""
-                role_rank = 0 if role in ("owner", "writer") else 1
-                return (primary_rank, role_rank)
-
-            items.sort(key=score)
-
-            options: list[discord.SelectOption] = []
-            index_to_calendar: dict[str, tuple[str, str]] = {}
-
-            i = 0
-            for c in items:
-                if i >= 5:
-                    break
-
-                cal_id = c.get("id")
-                name = c.get("summary") or cal_id
-                if not cal_id or not name:
-                    continue
-
-                idx = str(i)
-                label = name[:100]
-                desc = ("Primary" if c.get("primary") else (c.get("accessRole") or ""))[:100] or None
-
-                options.append(discord.SelectOption(label=label, value=idx, description=desc))
-                index_to_calendar[idx] = (cal_id, name)
-                i += 1
-
-            return options, index_to_calendar
-
-        try:
-            options, index_to_calendar = await asyncio.to_thread(fetch_calendar_options)
-
+            options, index_to_calendar = await self._fetch_calendar_options_for_user(interaction.user.id)
         except Exception as e:
             await interaction.followup.send(f"Failed to load calendars: {e}", ephemeral=True)
             return
@@ -447,6 +628,14 @@ class GCal(commands.GroupCog, group_name="gcal"):
             owner_id=interaction.user.id,
             options=options,
             index_to_calendar=index_to_calendar,
+            redirect_to_upcoming_after_save=True,
+            fetch_events=self._fetch_upcoming_events,
+            fetch_calendars=self._fetch_calendar_options_for_user,
+            build_v2_components=self._build_upcoming_v2_components,
+            render_time=self._event_time_display,
+            location_formatter=lambda raw: self._truncate(self._single_line(raw), 64),
+            redirect_range_mode="next24h",
+            page_size=6,
         )
 
         await interaction.followup.send(
@@ -456,107 +645,33 @@ class GCal(commands.GroupCog, group_name="gcal"):
         )
 
 
-    @app_commands.command(name="test", description="Test Google Calendar connection")
-    async def test(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="show", description="Show upcoming Google Calendar events")
+    async def show(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-
-        rt = await asyncio.to_thread(get_refresh_token, interaction.user.id)
-        if not rt:
-            await interaction.followup.send("You are not connected. Run `/gcal connect` first.", ephemeral=True)
-            return
-        
-        # Fetch selected calendars for this user (offload sync supabase call)
-        # if no selection, default to ["primary"]
-        selected = await asyncio.to_thread(get_selected_calendars, interaction.user.id)
-        calendar_ids = selected or ["primary"]
         try:
-            client_id, client_secret = self._require_google_oauth_client()
-        except RuntimeError as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-            return
-
-        def fetch():
-            creds = Credentials(
-                token=None,
-                refresh_token=rt,
-                token_uri=TOKEN_URI,
-                client_id=client_id,
-                client_secret=client_secret,
-                scopes=SCOPES,
+            items = await self._fetch_upcoming_events(interaction.user.id, range_mode="next24h")
+            if not items:
+                await interaction.followup.send("Connected ✅ No events in the next 24 hours.", ephemeral=True)
+                return
+            payload = {
+                "flags": _FLAG_EPHEMERAL | _FLAG_COMPONENTS_V2,
+                "components": self._build_upcoming_v2_components(
+                    owner_id=interaction.user.id,
+                    items=items,
+                    range_mode="next24h",
+                    page=0,
+                    page_size=6,
+                ),
+            }
+            route = Route(
+                "POST",
+                "/webhooks/{webhook_id}/{webhook_token}",
+                webhook_id=interaction.application_id,
+                webhook_token=interaction.token,
             )
-            creds.refresh(Request())
-            service = build("calendar", "v3", credentials=creds, cache_discovery=False)
-
-            cal = service.calendars().get(calendarId="primary").execute()
-
-            cals = service.calendarList().list().execute().get("items", [])
-            print("[GCAL TEST] calendars:", [(c.get("summary"), c.get("id"), c.get("primary")) for c in cals])
-
-            now = datetime.now(timezone.utc)
-            time_min = now.isoformat().replace("+00:00", "Z")
-            time_max = (now + timedelta(days=1)).isoformat().replace("+00:00", "Z")
-
-            # debug
-            # print("[GCAL TEST] calendar timeZone:", cal_tz)
-            # print("[GCAL TEST] timeMin:", time_min)
-            # print("[GCAL TEST] timeMax:", time_max)
-
-            all_items: list[dict] = []
-
-            for cal_id in calendar_ids:
-                res = service.events().list(
-                    calendarId=cal_id,
-                    timeMin=time_min,
-                    timeMax=time_max,
-                    singleEvents=True,
-                    orderBy="startTime",
-                    maxResults=10,   # per calendar
-                ).execute()
-                all_items.extend(res.get("items", []))
-
-            # Sort merged events by start time (dateTime preferred, date for all-day)
-            def start_key(ev: dict) -> str:
-                start = ev.get("start", {})
-                return start.get("dateTime") or start.get("date") or ""
-
-            all_items.sort(key=start_key)
-
-            return all_items[:10]  # show top 10 overall
-
-        try:
-            items = await asyncio.to_thread(fetch)
+            await self.bot.http.request(route, json=payload)
         except Exception as e:
-            await interaction.followup.send(f"Failed to fetch events: {e}", ephemeral=True)
-            return
-
-        if not items:
-            await interaction.followup.send("Connected ✅ No events in the next 24 hours.", ephemeral=True)
-            return
-
-       
-        embed = discord.Embed(
-            title="📅 Upcoming events",
-            description=f"Showing up to {len(items)} events in the next 24 hours.",
-        )
-
-        for ev in items[:10]:
-            title = ev.get("summary") or "Untitled"
-            when = self._event_time_display(ev)
-            event_id = ev.get("id", "unknown")
-
-            # optional: show which calendar it came from if you add it later
-            location = ev.get("location")
-            extra = f"\n`ID: {event_id}`"
-            if location:
-                extra += f"\n📍 {location}"
-
-            embed.add_field(
-                name=title[:256],
-                value=f"{when}{extra}",
-                inline=False,
-            )
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(f"Failed to show upcoming events: {e}", ephemeral=True)
 
         # await interaction.followup.send("\n".join(lines), ephemeral=True)
 
@@ -625,6 +740,113 @@ class GCal(commands.GroupCog, group_name="gcal"):
             ephemeral=True,
         )
 
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        data = getattr(interaction, "data", None) or {}
+        custom_id = str(data.get("custom_id", "") or "")
+        if not custom_id.startswith("gcalv2:"):
+            return
+
+        parts = custom_id.split(":")
+        if len(parts) != 5:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Invalid UI action.", ephemeral=True)
+            return
+
+        _, owner_raw, action, range_mode, page_raw = parts
+        try:
+            owner_id = int(owner_raw)
+            page = int(page_raw)
+        except ValueError:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Invalid UI state.", ephemeral=True)
+            return
+
+        if interaction.user.id != owner_id:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("This UI isn’t for you.", ephemeral=True)
+            return
+
+        if action == "cal":
+            try:
+                options, index_to_calendar = await self._fetch_calendar_options_for_user(interaction.user.id)
+            except Exception as e:
+                await interaction.response.send_message(f"Failed to load calendars: {e}", ephemeral=True)
+                return
+            if not options:
+                await interaction.response.send_message("No calendars found.", ephemeral=True)
+                return
+
+            view = CalendarSelectView(
+                owner_id=interaction.user.id,
+                options=options,
+                index_to_calendar=index_to_calendar,
+                redirect_to_upcoming_after_save=True,
+                fetch_events=self._fetch_upcoming_events,
+                fetch_calendars=self._fetch_calendar_options_for_user,
+                build_v2_components=self._build_upcoming_v2_components,
+                render_time=self._event_time_display,
+                location_formatter=lambda raw: self._truncate(self._single_line(raw), 64),
+                redirect_range_mode=range_mode,
+                page_size=6,
+            )
+            await interaction.response.send_message(
+                "Pick calendars (showing up to 5):",
+                view=view,
+                ephemeral=True,
+            )
+            return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+        target_range = range_mode
+        if action == "today":
+            target_range = "today"
+        elif action == "next24":
+            target_range = "next24h"
+        elif action == "toggle":
+            target_range = "today" if range_mode != "today" else "next24h"
+
+        try:
+            items = await self._fetch_upcoming_events(interaction.user.id, range_mode=target_range)
+        except Exception as e:
+            await interaction.followup.send(f"Failed to refresh events: {e}", ephemeral=True)
+            return
+
+        if not items:
+            await interaction.followup.send("No events found for this range.", ephemeral=True)
+            return
+
+        total_pages = max(1, (len(items) + 6 - 1) // 6)
+        if action == "prev":
+            page = max(0, page - 1)
+        elif action == "next":
+            page = min(total_pages - 1, page + 1)
+        elif action == "refresh":
+            page = min(page, total_pages - 1)
+        elif action in {"today", "next24", "toggle"}:
+            page = 0
+
+        components = self._build_upcoming_v2_components(
+            owner_id=interaction.user.id,
+            items=items,
+            range_mode=target_range,
+            page=page,
+            page_size=6,
+        )
+        route = Route(
+            "PATCH",
+            "/webhooks/{webhook_id}/{webhook_token}/messages/{message_id}",
+            webhook_id=interaction.application_id,
+            webhook_token=interaction.token,
+            message_id=interaction.message.id,  # type: ignore[arg-type]
+        )
+        try:
+            await self.bot.http.request(route, json={"components": components})
+        except Exception as e:
+            await interaction.followup.send(f"Failed to update UI: {e}", ephemeral=True)
+
 
 class CalendarSelect(discord.ui.Select):
     def __init__(self, options: list[discord.SelectOption], index_to_calendar: dict[str, tuple[str, str]]):
@@ -657,10 +879,55 @@ class CalendarSelect(discord.ui.Select):
         await asyncio.to_thread(set_selected_calendars, interaction.user.id, chosen_ids)
 
         pretty = "\n".join(f"• {name}" for name in chosen_names)
-        await interaction.response.send_message(
-            f"Saved ✅ I’ll send reminders for:\n{pretty}",
-            ephemeral=True,
-        )
+        saved_text = f"Saved ✅ I’ll send reminders for:\n{pretty}"
+
+        if view.redirect_to_upcoming_after_save and view.fetch_events is not None:
+            await interaction.response.send_message(saved_text, ephemeral=True)
+            try:
+                items = await view.fetch_events(interaction.user.id, range_mode=view.redirect_range_mode)
+            except Exception as e:
+                await interaction.followup.send(
+                    f"Failed to refresh upcoming events: {e}",
+                    ephemeral=True,
+                )
+            else:
+                if not items:
+                    await interaction.followup.send(
+                        "No events found for the selected range.",
+                        ephemeral=True,
+                    )
+                else:
+                    if view.build_v2_components is None:
+                        await interaction.followup.send(
+                            "Saved, but V2 renderer is unavailable.",
+                            ephemeral=True,
+                        )
+                    else:
+                        payload = {
+                            "flags": _FLAG_EPHEMERAL | _FLAG_COMPONENTS_V2,
+                            "components": view.build_v2_components(
+                                owner_id=interaction.user.id,
+                                items=items,
+                                range_mode=view.redirect_range_mode,
+                                page=0,
+                                page_size=view.page_size,
+                            ),
+                        }
+                        route = Route(
+                            "POST",
+                            "/webhooks/{webhook_id}/{webhook_token}",
+                            webhook_id=interaction.application_id,
+                            webhook_token=interaction.token,
+                        )
+                        try:
+                            await interaction.client.http.request(route, json=payload)  # type: ignore[union-attr]
+                        except Exception as e:
+                            await interaction.followup.send(
+                                f"Saved, but failed to render events card: {e}",
+                                ephemeral=True,
+                            )
+        else:
+            await interaction.response.send_message(saved_text, ephemeral=True)
 
         self.disabled = True
         view.stop()
@@ -673,11 +940,169 @@ class CalendarSelect(discord.ui.Select):
 
 
 class CalendarSelectView(discord.ui.View):
-    def __init__(self, owner_id: int, options: list[discord.SelectOption], index_to_calendar: dict[str, tuple[str, str]]):
+    def __init__(
+        self,
+        owner_id: int,
+        options: list[discord.SelectOption],
+        index_to_calendar: dict[str, tuple[str, str]],
+        *,
+        redirect_to_upcoming_after_save: bool = False,
+        fetch_events: Callable[..., Awaitable[list[dict]]] | None = None,
+        fetch_calendars: Callable[[int], Awaitable[tuple[list[discord.SelectOption], dict[str, tuple[str, str]]]]] | None = None,
+        build_v2_components: Callable[..., list[dict]] | None = None,
+        render_time=None,
+        location_formatter=None,
+        redirect_range_mode: str = "next24h",
+        page_size: int = 6,
+    ):
         super().__init__(timeout=120)
         self.owner_id = owner_id
+        self.redirect_to_upcoming_after_save = redirect_to_upcoming_after_save
+        self.fetch_events = fetch_events
+        self.fetch_calendars = fetch_calendars
+        self.build_v2_components = build_v2_components
+        self.render_time = render_time
+        self.location_formatter = location_formatter
+        self.redirect_range_mode = redirect_range_mode
+        self.page_size = page_size
         self.add_item(CalendarSelect(options, index_to_calendar))
-        
+
+
+class UpcomingEventsPagerView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        owner_id: int,
+        items: list[dict],
+        render_time,
+        location_formatter,
+        fetch_events: Callable[..., Awaitable[list[dict]]],
+        fetch_calendars: Callable[[int], Awaitable[tuple[list[discord.SelectOption], dict[str, tuple[str, str]]]]],
+        range_mode: str = "next24h",
+        page_size: int = 6,
+    ):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.items = items
+        self.render_time = render_time
+        self.location_formatter = location_formatter
+        self.fetch_events = fetch_events
+        self.fetch_calendars = fetch_calendars
+        self.range_mode = range_mode
+        self.page_size = max(1, page_size)
+        self.page_index = 0
+        self._sync_buttons()
+
+    def _page_count(self) -> int:
+        return max(1, (len(self.items) + self.page_size - 1) // self.page_size)
+
+    def _sync_buttons(self) -> None:
+        total = self._page_count()
+        self.prev_button.disabled = self.page_index <= 0
+        self.next_button.disabled = self.page_index >= (total - 1)
+        self.range_toggle_button.label = "⏱️ Next 24h" if self.range_mode == "today" else "📆 Today"
+
+    def current_embed(self) -> discord.Embed:
+        total = self._page_count()
+        start = self.page_index * self.page_size
+        end = start + self.page_size
+        page_items = self.items[start:end]
+
+        embed = discord.Embed(
+            title="🗓️ Upcoming Events",
+            description=(
+                f"**Schedule Snapshot**\n"
+                f"{len(self.items)} event(s) "
+                f"in {'today' if self.range_mode == 'today' else 'the next 24 hours'}."
+            ),
+        )
+        embed.set_footer(text=f"Page {self.page_index + 1}/{total}")
+
+        for ev in page_items:
+            title = str(ev.get("summary") or "Untitled")[:256]
+            when = self.render_time(ev)
+            location = self.location_formatter(ev.get("location"))
+
+            details = f"🕒 {when}"
+            if location:
+                details += f"\n📍 {location}"
+            # Keep a visual gap between events in dense lists.
+            details += "\n\u200b"
+
+            embed.add_field(name=title, value=details, inline=False)
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This pager isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    async def _render(self, interaction: discord.Interaction) -> None:
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    async def _reload_items(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            self.items = await self.fetch_events(self.owner_id, range_mode=self.range_mode)
+            self.page_index = 0
+            self._sync_buttons()
+            await interaction.edit_original_response(embed=self.current_embed(), view=self)
+        except Exception as e:
+            await interaction.followup.send(f"Failed to refresh events: {e}", ephemeral=True)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if self.page_index > 0:
+            self.page_index -= 1
+        await self._render(interaction)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if self.page_index < self._page_count() - 1:
+            self.page_index += 1
+        await self._render(interaction)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary)
+    async def refresh_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self._reload_items(interaction)
+
+    @discord.ui.button(label="📆 Today", style=discord.ButtonStyle.secondary)
+    async def range_toggle_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        self.range_mode = "today" if self.range_mode != "today" else "next24h"
+        await self._reload_items(interaction)
+
+    @discord.ui.button(label="🗂️ Calendars", style=discord.ButtonStyle.success)
+    async def calendars_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        try:
+            options, index_to_calendar = await self.fetch_calendars(self.owner_id)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to load calendars: {e}", ephemeral=True)
+            return
+
+        if not options:
+            await interaction.response.send_message("No calendars found.", ephemeral=True)
+            return
+
+        view = CalendarSelectView(
+            owner_id=self.owner_id,
+            options=options,
+            index_to_calendar=index_to_calendar,
+            redirect_to_upcoming_after_save=True,
+            fetch_events=self.fetch_events,
+            fetch_calendars=self.fetch_calendars,
+            render_time=self.render_time,
+            location_formatter=self.location_formatter,
+            redirect_range_mode=self.range_mode,
+            page_size=self.page_size,
+        )
+        await interaction.response.send_message(
+            "Pick calendars (showing up to 5):",
+            view=view,
+            ephemeral=True,
+        )
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(GCal(bot))
