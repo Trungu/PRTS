@@ -26,6 +26,7 @@ class DummyMessage:
         self.author = DummyAuthor(bot=author_bot)
         self.channel = DummyChannel()
         self.reference = None
+        self._state = None
 
 
 class DummyRef:
@@ -97,6 +98,7 @@ def test_on_message_skips_delete_count_command_in_channel_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bot = Bot()
+    monkeypatch.setattr(bot.__class__, "user", type("MockUser", (), {"id": 12345})(), raising=False)
     msg = DummyMessage("delete count 3")
     remembered = []
 
@@ -116,6 +118,7 @@ def test_on_message_keeps_normal_message_in_channel_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bot = Bot()
+    monkeypatch.setattr(bot.__class__, "user", type("MockUser", (), {"id": 12345})(), raising=False)
     msg = DummyMessage("hello")
     remembered = []
 
