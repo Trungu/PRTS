@@ -20,9 +20,18 @@ class DummyChannel:
         yield
 
 
+class DummyAuthor:
+    def __init__(self) -> None:
+        self.id = 12345
+        self.name = "user"
+        self.display_name = "user"
+
+    def __str__(self) -> str:
+        return self.name
+
 class DummyMessage:
     def __init__(self) -> None:
-        self.author = "user"
+        self.author = DummyAuthor()
         self.channel = DummyChannel()
         self.attachments: list = []
         self.reference = None
@@ -455,7 +464,7 @@ def test_ask_handles_recent_message_lookup_deterministically(
     asyncio.run(
         cog._ask(
             cast(Any, msg),
-            "find the most recent message by the user Parthiv using your lookup tool",
+                "find the most recent message by the user Parthiv",
         )
     )
 
